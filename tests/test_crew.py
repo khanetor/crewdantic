@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from typing import assert_type
 
 import anyio
 from pydantic import BaseModel, ValidationError
@@ -107,7 +108,7 @@ class CrewTests(unittest.TestCase):
             self.assertIn("Role: Writer", requests[1][0])
             self.assertIn("Previous task output:\noutput 1", requests[1][1])
 
-    def test_uses_optional_agent_output_models(self) -> None:
+    def test_uses_final_agent_output_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             agents = root / "agents.yaml"
@@ -118,27 +119,33 @@ class CrewTests(unittest.TestCase):
                 "  goal: Find facts\n"
                 "  backstory: Curious\n"
                 "  llm: test\n"
-                "  output_model: ResearchOutput\n"
-                "writer:\n"
-                "  role: Writer\n"
+                "composer:\n"
+                "  role: Composer\n"
                 "  goal: Write clearly\n"
                 "  backstory: Clear\n"
                 "  llm: test\n"
+                "  output_model: ResearchOutput\n"
             )
             tasks.write_text(
                 "research:\n"
                 "  description: Research bees\n"
-                "  expected_output: One finding\n"
+                "  expected_output: Raw findings\n"
                 "  agent: researcher\n"
+                "compose:\n"
+                "  description: Compose the final report\n"
+                "  expected_output: One structured finding\n"
+                "  agent: composer\n"
             )
 
-            class StructuredCrew(Crew):
+            class StructuredCrew(Crew[ResearchOutput]):
                 agent_definition = agents
                 task_definition = tasks
 
             crew = StructuredCrew(pydantic_models=[ResearchOutput])
 
             def respond(messages, info):
+                if not info.output_tools:
+                    return ModelResponse(parts=[TextPart(content="Raw findings")])
                 return ModelResponse(
                     parts=[
                         ToolCallPart(
@@ -148,14 +155,49 @@ class CrewTests(unittest.TestCase):
                     ]
                 )
 
-            with crew.agents["researcher"].override(model=FunctionModel(respond)):
+            with ExitStack() as overrides:
+                model = FunctionModel(respond)
+                for agent in crew.agents.values():
+                    overrides.enter_context(agent.override(model=model))
                 output = anyio.run(crew.kickoff)
 
+            assert_type(output, ResearchOutput)
             self.assertEqual(
                 output,
                 ResearchOutput(finding="Bees communicate by dancing."),
             )
-            self.assertIs(crew.agents["writer"].output_type, str)
+            self.assertIs(crew.agents["researcher"].output_type, str)
+            self.assertIs(crew.agents["composer"].output_type, ResearchOutput)
+
+    def test_rejects_final_agent_output_mismatch_at_construction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "writer:\n"
+                "  role: Writer\n"
+                "  goal: Write clearly\n"
+                "  backstory: Clear\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "write:\n"
+                "  description: Write the report\n"
+                "  expected_output: A report\n"
+                "  agent: writer\n"
+            )
+
+            class MismatchedCrew(Crew[ResearchOutput]):
+                agent_definition = agents
+                task_definition = tasks
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "MismatchedCrew declares crew output ResearchOutput, but final "
+                "task 'write' uses agent 'writer' with output str",
+            ):
+                MismatchedCrew(pydantic_models=[ResearchOutput])
 
     def test_rejects_unknown_agent_output_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

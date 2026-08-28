@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, ClassVar, TypeVar
+from typing import Annotated, ClassVar, Generic, TypeVar, cast, get_args, get_origin
 
 import yaml  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -31,6 +31,7 @@ class TaskDefinition(BaseModel):
 
 
 Definition = TypeVar("Definition")
+CrewOutputT = TypeVar("CrewOutputT", bound=BaseModel | str)
 _AGENT_DEFINITIONS = TypeAdapter(dict[str, AgentDefinition])
 _TASK_DEFINITIONS = TypeAdapter(dict[str, TaskDefinition])
 
@@ -40,7 +41,7 @@ def _load_yaml(path: Path, adapter: TypeAdapter[Definition]) -> Definition:
         return adapter.validate_python(yaml.safe_load(definition_file))
 
 
-class Crew:
+class Crew(Generic[CrewOutputT]):
     agent_definition: ClassVar[str | Path | None] = None
     task_definition: ClassVar[str | Path | None] = None
 
@@ -83,6 +84,28 @@ class Crew:
                     f"Agent {agent_name!r} references undefined Pydantic model "
                     f"{definition.output_model!r}"
                 )
+        declared_output_type = self._declared_output_type()
+        if declared_output_type is not None:
+            if not self.task_definitions:
+                raise TypeError(
+                    f"{type(self).__name__} declares crew output "
+                    f"{declared_output_type.__name__} but has no tasks"
+                )
+            final_task_name = next(reversed(self.task_definitions))
+            final_task = self.task_definitions[final_task_name]
+            final_definition = self.agent_definitions[final_task.agent]
+            final_output_type = (
+                output_models[final_definition.output_model]
+                if final_definition.output_model is not None
+                else str
+            )
+            if final_output_type is not declared_output_type:
+                raise TypeError(
+                    f"{type(self).__name__} declares crew output "
+                    f"{declared_output_type.__name__}, but final task "
+                    f"{final_task_name!r} uses agent {final_task.agent!r} "
+                    f"with output {final_output_type.__name__}"
+                )
 
         self.agents = {
             name: Agent(
@@ -102,9 +125,7 @@ class Crew:
             for name, definition in self.agent_definitions.items()
         }
 
-    async def kickoff(
-        self, inputs: Mapping[str, object] | None = None
-    ) -> BaseModel | str:
+    async def kickoff(self, inputs: Mapping[str, object] | None = None) -> CrewOutputT:
         values = inputs or {}
         previous_output: BaseModel | str | None = None
 
@@ -119,7 +140,17 @@ class Crew:
             result = await self.agents[task.agent].run(prompt)
             previous_output = result.output
 
-        return previous_output if previous_output is not None else ""
+        return cast(CrewOutputT, previous_output if previous_output is not None else "")
+
+    @classmethod
+    def _declared_output_type(
+        cls,
+    ) -> type[BaseModel | str] | None:
+        for base in getattr(cls, "__orig_bases__", ()):
+            if get_origin(base) is Crew:
+                output_type = get_args(base)[0]
+                return output_type if isinstance(output_type, type) else None
+        return None
 
     @classmethod
     def _definition_path(cls, attribute: str) -> Path:

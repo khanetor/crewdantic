@@ -22,7 +22,7 @@ class ResearchOutput(BaseModel):
     summary: str
 
 
-class ResearchCrew(Crew):
+class ResearchCrew(Crew[ResearchOutput]):
     agent_definition = "agents.yaml"
     task_definition = "tasks.yaml"
 ```
@@ -34,6 +34,11 @@ researcher:
   goal: Apply {expertise} expertise
   backstory: An experienced {expertise} researcher
   llm: openai:gpt-5.2
+composer:
+  role: Report composer
+  goal: Turn research into a concise report
+  backstory: An experienced technical writer
+  llm: openai:gpt-5.2
   output_model: ResearchOutput
 ```
 
@@ -43,13 +48,21 @@ research:
   description: Research {topic}
   expected_output: A concise report about {topic}
   agent: researcher
+compose:
+  description: Compose the final report from the research
+  expected_output: A concise structured report
+  agent: composer
 ```
 
 `ResearchCrew` turns each agent declaration into a Pydantic AI `Agent`.
 Every agent must declare a Pydantic AI model name as `llm`; invalid names fail
-during crew construction. An agent may also declare `output_model`, matching
-the class name of one of the Pydantic models passed to the crew. `kickoff()`
-runs tasks in YAML order and passes each output to the next task:
+during crew construction. Agents return text unless they declare
+`output_model`, matching the class name of one of the Pydantic models passed
+to the crew. `kickoff()` runs tasks in YAML order, passes each output to the
+next task, and returns the final task's agent output. `Crew[ResearchOutput]`
+makes that return type available to static type checkers. Crew construction
+also verifies that the final task's agent uses the same output type, before
+any agent runs:
 
 ```python
 crew = ResearchCrew(
