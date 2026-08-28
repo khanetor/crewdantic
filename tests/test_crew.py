@@ -4,17 +4,22 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import anyio
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_ai import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
     UserError,
     UserPromptPart,
 )
 from pydantic_ai.models.function import FunctionModel
 
 from crewdantic import Crew
+
+
+class ResearchOutput(BaseModel):
+    finding: str
 
 
 class ExampleCrew(Crew):
@@ -62,11 +67,13 @@ class CrewTests(unittest.TestCase):
                 instructions = info.instructions
                 assert instructions is not None
                 request = next(
-                    message for message in reversed(messages)
+                    message
+                    for message in reversed(messages)
                     if isinstance(message, ModelRequest)
                 )
                 prompt = next(
-                    part.content for part in request.parts
+                    part.content
+                    for part in request.parts
                     if isinstance(part, UserPromptPart)
                 )
                 assert isinstance(prompt, str)
@@ -79,27 +86,19 @@ class CrewTests(unittest.TestCase):
                 agent_definition = agents
                 task_definition = tasks
 
-            crew = SequentialCrew(
-                agent_variables={"topic": [{"name": "bees"}]}
-            )
+            crew = SequentialCrew(agent_variables={"topic": [{"name": "bees"}]})
             with ExitStack() as overrides:
                 model = FunctionModel(respond)
                 for agent in crew.agents.values():
                     overrides.enter_context(agent.override(model=model))
-                output = anyio.run(
-                    crew.kickoff, {"topic": [{"name": "wasps"}]}
-                )
+                output = anyio.run(crew.kickoff, {"topic": [{"name": "wasps"}]})
 
             self.assertEqual(set(crew.agents), {"researcher", "writer"})
             self.assertEqual(crew.agents["researcher"].name, "researcher")
             self.assertEqual(output, "output 2")
             self.assertIn("Role: [{'name': 'bees'}] Researcher", requests[0][0])
-            self.assertIn(
-                "Goal: Find facts about [{'name': 'bees'}]", requests[0][0]
-            )
-            self.assertIn(
-                "Backstory: Curious about [{'name': 'bees'}]", requests[0][0]
-            )
+            self.assertIn("Goal: Find facts about [{'name': 'bees'}]", requests[0][0])
+            self.assertIn("Backstory: Curious about [{'name': 'bees'}]", requests[0][0])
             self.assertIn("Research [{'name': 'wasps'}]", requests[0][1])
             self.assertIn(
                 "Expected output:\nFacts about [{'name': 'wasps'}]",
@@ -107,6 +106,82 @@ class CrewTests(unittest.TestCase):
             )
             self.assertIn("Role: Writer", requests[1][0])
             self.assertIn("Previous task output:\noutput 1", requests[1][1])
+
+    def test_uses_optional_agent_output_models(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Find facts\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+                "writer:\n"
+                "  role: Writer\n"
+                "  goal: Write clearly\n"
+                "  backstory: Clear\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research bees\n"
+                "  expected_output: One finding\n"
+                "  agent: researcher\n"
+            )
+
+            class StructuredCrew(Crew):
+                agent_definition = agents
+                task_definition = tasks
+
+            crew = StructuredCrew(pydantic_models=[ResearchOutput])
+
+            def respond(messages, info):
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name=info.output_tools[0].name,
+                            args={"finding": "Bees communicate by dancing."},
+                        )
+                    ]
+                )
+
+            with crew.agents["researcher"].override(model=FunctionModel(respond)):
+                output = anyio.run(crew.kickoff)
+
+            self.assertEqual(
+                output,
+                ResearchOutput(finding="Bees communicate by dancing."),
+            )
+            self.assertIs(crew.agents["writer"].output_type, str)
+
+    def test_rejects_unknown_agent_output_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Find facts\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+                "  output_model: MissingOutput\n"
+            )
+            tasks.write_text("{}\n")
+
+            class InvalidCrew(Crew):
+                agent_definition = agents
+                task_definition = tasks
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Agent 'researcher' references undefined Pydantic model "
+                "'MissingOutput'",
+            ):
+                InvalidCrew(pydantic_models=[ResearchOutput])
 
     def test_requires_a_valid_llm_for_each_agent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

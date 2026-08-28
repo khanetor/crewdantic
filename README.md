@@ -14,7 +14,12 @@ Place the definitions beside the Python module that declares the crew:
 
 ```python
 # research_crew.py
+from pydantic import BaseModel
+
 from crewdantic import Crew
+
+class ResearchOutput(BaseModel):
+    summary: str
 
 
 class ResearchCrew(Crew):
@@ -29,6 +34,7 @@ researcher:
   goal: Apply {expertise} expertise
   backstory: An experienced {expertise} researcher
   llm: openai:gpt-5.2
+  output_model: ResearchOutput
 ```
 
 ```yaml
@@ -41,11 +47,15 @@ research:
 
 `ResearchCrew` turns each agent declaration into a Pydantic AI `Agent`.
 Every agent must declare a Pydantic AI model name as `llm`; invalid names fail
-during crew construction. `kickoff()` runs tasks in YAML order and passes each
-output to the next task:
+during crew construction. An agent may also declare `output_model`, matching
+the class name of one of the Pydantic models passed to the crew. `kickoff()`
+runs tasks in YAML order and passes each output to the next task:
 
 ```python
-crew = ResearchCrew(agent_variables={"expertise": "AI"})
+crew = ResearchCrew(
+    agent_variables={"expertise": "AI"},
+    pydantic_models=[ResearchOutput],
+)
 report = await crew.kickoff({"topic": "AI agents"})
 ```
 

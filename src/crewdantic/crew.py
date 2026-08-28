@@ -19,6 +19,7 @@ class AgentDefinition(BaseModel):
     goal: NonEmptyString
     backstory: NonEmptyString
     llm: NonEmptyString
+    output_model: NonEmptyString | None = None
 
 
 class TaskDefinition(BaseModel):
@@ -44,7 +45,9 @@ class Crew:
     task_definition: ClassVar[str | Path | None] = None
 
     def __init__(
-        self, agent_variables: Mapping[str, object] | None = None
+        self,
+        agent_variables: Mapping[str, object] | None = None,
+        pydantic_models: list[type[BaseModel]] | None = None,
     ) -> None:
         missing_definitions = [
             attribute
@@ -70,11 +73,26 @@ class Crew:
                 )
 
         variables = agent_variables or {}
+        output_models = {model.__name__: model for model in pydantic_models or []}
+        for agent_name, definition in self.agent_definitions.items():
+            if (
+                definition.output_model is not None
+                and definition.output_model not in output_models
+            ):
+                raise ValueError(
+                    f"Agent {agent_name!r} references undefined Pydantic model "
+                    f"{definition.output_model!r}"
+                )
 
         self.agents = {
             name: Agent(
                 model=definition.llm,
                 name=name,
+                output_type=(
+                    output_models[definition.output_model]
+                    if definition.output_model is not None
+                    else str
+                ),
                 instructions=(
                     f"Role: {definition.role.format_map(variables)}\n"
                     f"Goal: {definition.goal.format_map(variables)}\n"
@@ -86,9 +104,9 @@ class Crew:
 
     async def kickoff(
         self, inputs: Mapping[str, object] | None = None
-    ) -> str:
+    ) -> BaseModel | str:
         values = inputs or {}
-        previous_output: str | None = None
+        previous_output: BaseModel | str | None = None
 
         for task in self.task_definitions.values():
             prompt = (
@@ -101,7 +119,7 @@ class Crew:
             result = await self.agents[task.agent].run(prompt)
             previous_output = result.output
 
-        return previous_output or ""
+        return previous_output if previous_output is not None else ""
 
     @classmethod
     def _definition_path(cls, attribute: str) -> Path:
