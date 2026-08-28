@@ -77,3 +77,10 @@ construction. Task descriptions and expected outputs interpolate `kickoff()`
 inputs independently.
 Template values may be any Python object supported by string formatting,
 including lists, mappings, and Pydantic models.
+
+## Roadmap
+
+- Tool definitions and execution
+- Reusable capabilities
+- MCP integration
+- Workflow orchestration
