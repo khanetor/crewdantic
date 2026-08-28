@@ -1,0 +1,27 @@
+[project]
+name = "crewdantic"
+version = "0.1.0"
+description = "A small Python library."
+readme = "README.md"
+authors = [{ name = "khanetor", email = "nlhkha@gmail.com" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["crewdantic"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.13.4",
+    "pydantic-ai>=2.35.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
