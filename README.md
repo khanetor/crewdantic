@@ -25,18 +25,32 @@ class ResearchCrew(Crew):
 ```yaml
 # agents.yaml
 researcher:
-  role: Researcher
-  goal: Research the requested topic
-  backstory: An experienced researcher
+  role: "{expertise} Researcher"
+  goal: Apply {expertise} expertise
+  backstory: An experienced {expertise} researcher
+  llm: openai:gpt-5.2
 ```
 
 ```yaml
 # tasks.yaml
 research:
-  description: Research the requested topic
-  expected_output: A concise report
+  description: Research {topic}
+  expected_output: A concise report about {topic}
   agent: researcher
 ```
 
-Instantiating `ResearchCrew` validates both files and exposes
-`agent_definitions` and `task_definitions` mappings.
+`ResearchCrew` turns each agent declaration into a Pydantic AI `Agent`.
+Every agent must declare a Pydantic AI model name as `llm`; invalid names fail
+during crew construction. `kickoff()` runs tasks in YAML order and passes each
+output to the next task:
+
+```python
+crew = ResearchCrew(agent_variables={"expertise": "AI"})
+report = await crew.kickoff({"topic": "AI agents"})
+```
+
+Agent roles, goals, and backstories interpolate `agent_variables` during crew
+construction. Task descriptions and expected outputs interpolate `kickoff()`
+inputs independently.
+Template values may be any Python object supported by string formatting,
+including lists, mappings, and Pydantic models.

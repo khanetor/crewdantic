@@ -2,4 +2,5 @@ researcher:
   role: Researcher
   goal: Research the requested topic
   backstory: An experienced researcher
+  llm: test
   verbose: true
