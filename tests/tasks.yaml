@@ -1,0 +1,5 @@
+research:
+  description: Research the requested topic
+  expected_output: A concise report
+  agent: researcher
+  markdown: true

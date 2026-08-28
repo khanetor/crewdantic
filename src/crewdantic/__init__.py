@@ -1,2 +1,3 @@
-def hello() -> str:
-    return "Hello from crewdantic!"
+from .crew import Crew
+
+__all__ = ["Crew"]

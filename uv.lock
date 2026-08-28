@@ -423,12 +423,14 @@ source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
     { name = "pydantic-ai" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-ai", specifier = ">=2.35.3" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [[package]]

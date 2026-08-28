@@ -1,0 +1,5 @@
+researcher:
+  role: Researcher
+  goal: Research the requested topic
+  backstory: An experienced researcher
+  verbose: true
