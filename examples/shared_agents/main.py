@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import anyio
 from pydantic import BaseModel
 
@@ -12,23 +10,23 @@ class ResearchReport(BaseModel):
     key_points: list[str]
 
 
-class ResearchCrew(Crew[ResearchReport]):
-    agent_definition = "agents.yaml"
-    task_definition = "research_tasks.yaml"
-
-
-class BriefResearchCrew(Crew[ResearchReport]):
-    agent_definition = "agents.yaml"
-    task_definition = "brief_tasks.yaml"
-
-
 async def main() -> None:
     topic = "honeybee communication"
-    crew = BriefResearchCrew(
-        agent_variables={"topic": topic},
-        pydantic_models=[ResearchReport],
-    )
-    report = await crew.kickoff({"topic": topic})
+    crews = {
+        "full": Crew(
+            agent_definition="agents.yaml",
+            task_definition="research_tasks.yaml",
+            output_type=ResearchReport,
+            agent_variables={"topic": topic},
+        ),
+        "brief": Crew(
+            agent_definition="agents.yaml",
+            task_definition="brief_tasks.yaml",
+            output_type=ResearchReport,
+            agent_variables={"topic": topic},
+        ),
+    }
+    report = await crews["brief"].kickoff({"topic": topic})
 
     assert isinstance(report, ResearchReport)
     assert report.key_points

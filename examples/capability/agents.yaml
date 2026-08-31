@@ -1,0 +1,7 @@
+writer:
+  role: Writer
+  goal: Explain one concept clearly
+  backstory: A concise technical writer
+  llm: test
+  capabilities:
+    - ConciseCapability

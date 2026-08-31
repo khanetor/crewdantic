@@ -1,0 +1,4 @@
+calculate:
+  description: Run the arithmetic tools
+  expected_output: Both tool results
+  agent: calculator

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import assert_type
 
@@ -9,11 +10,15 @@ from pydantic import BaseModel, ValidationError
 from pydantic_ai import (
     ModelRequest,
     ModelResponse,
+    RunContext,
     TextPart,
+    Tool,
     ToolCallPart,
+    ToolReturnPart,
     UserError,
     UserPromptPart,
 )
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models.function import FunctionModel
 
 from crewdantic import Crew
@@ -23,17 +28,23 @@ class ResearchOutput(BaseModel):
     finding: str
 
 
-class ExampleCrew(Crew):
-    agent_definition = "agents.yaml"
-    task_definition = "tasks.yaml"
+@dataclass
+class ToolContext:
+    offset: int
 
 
 class CrewTests(unittest.TestCase):
-    def test_loads_definitions_relative_to_crew_module(self) -> None:
-        crew = ExampleCrew()
+    def test_loads_relative_string_definition_paths_and_type_defaults(self) -> None:
+        crew = Crew(
+            agent_definition="agents.yaml",
+            task_definition="tasks.yaml",
+        )
+        assert_type(crew, Crew[str, object])
 
         self.assertEqual(crew.agent_definitions["researcher"].role, "Researcher")
         self.assertEqual(crew.task_definitions["research"].agent, "researcher")
+        self.assertFalse(hasattr(crew.agent_definitions["researcher"], "verbose"))
+        self.assertFalse(hasattr(crew.task_definitions["research"], "markdown"))
 
     def test_builds_agents_and_runs_tasks_sequentially(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -83,11 +94,11 @@ class CrewTests(unittest.TestCase):
                     parts=[TextPart(content=f"output {len(requests)}")]
                 )
 
-            class SequentialCrew(Crew):
-                agent_definition = agents
-                task_definition = tasks
-
-            crew = SequentialCrew(agent_variables={"topic": [{"name": "bees"}]})
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+                agent_variables={"topic": [{"name": "bees"}]},
+            )
             with ExitStack() as overrides:
                 model = FunctionModel(respond)
                 for agent in crew.agents.values():
@@ -107,6 +118,135 @@ class CrewTests(unittest.TestCase):
             )
             self.assertIn("Role: Writer", requests[1][0])
             self.assertIn("Previous task output:\noutput 1", requests[1][1])
+
+    def test_supports_pydantic_ai_tools_capabilities_and_decorators(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Use tools\n"
+                "  backstory: Capable\n"
+                "  llm: test\n"
+                "  tools:\n"
+                "    - increment\n"
+                "    - double\n"
+                "  capabilities:\n"
+                "    - ExtraInstructions\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Calculate\n"
+                "  expected_output: A result\n"
+                "  agent: researcher\n"
+            )
+
+            def increment(ctx: RunContext[ToolContext], value: int) -> int:
+                return value + 1 + ctx.deps.offset
+
+            def double(ctx: RunContext[ToolContext], value: int) -> int:
+                return value * 2 + ctx.deps.offset
+
+            def unused(ctx: RunContext[ToolContext], value: int) -> int:
+                return value + ctx.deps.offset
+
+            class ExtraInstructions(AbstractCapability[ToolContext]):
+                def get_instructions(self) -> str:
+                    return "Capability enabled."
+
+            class UnusedInstructions(AbstractCapability[ToolContext]):
+                def get_instructions(self) -> str:
+                    return "Unused capability."
+
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+                deps_type=ToolContext,
+                tools=[Tool(increment, name="increment"), double, unused],
+                capabilities=[ExtraInstructions(), UnusedInstructions()],
+            )
+
+            @crew.agents["researcher"].tool
+            def decrement(ctx: RunContext[ToolContext], value: int) -> int:
+                return value - 1 + ctx.deps.offset
+
+            def respond(messages, info):
+                tool_returns = [
+                    part
+                    for message in messages
+                    if isinstance(message, ModelRequest)
+                    for part in message.parts
+                    if isinstance(part, ToolReturnPart)
+                ]
+                if not tool_returns:
+                    self.assertEqual(
+                        {tool.name for tool in info.function_tools},
+                        {"increment", "double", "decrement"},
+                    )
+                    self.assertIn("Capability enabled.", info.instructions or "")
+                    self.assertNotIn("Unused capability.", info.instructions or "")
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart(
+                                tool_name="increment",
+                                args={"value": 1},
+                                tool_call_id="increment",
+                            ),
+                            ToolCallPart(
+                                tool_name="double",
+                                args={"value": 2},
+                                tool_call_id="double",
+                            ),
+                            ToolCallPart(
+                                tool_name="decrement",
+                                args={"value": 4},
+                                tool_call_id="decrement",
+                            ),
+                        ]
+                    )
+
+                self.assertEqual(
+                    {part.tool_name: part.content for part in tool_returns},
+                    {"increment": 12, "double": 14, "decrement": 13},
+                )
+                return ModelResponse(parts=[TextPart(content="Tools worked")])
+
+            self.assertIs(crew.agents["researcher"].deps_type, ToolContext)
+            with crew.agents["researcher"].override(model=FunctionModel(respond)):
+                output = anyio.run(crew.kickoff, None, ToolContext(offset=10))
+
+            self.assertEqual(output, "Tools worked")
+            agents.write_text(agents.read_text().replace("increment", "missing"))
+            with self.assertRaisesRegex(
+                ValueError,
+                "Agent 'researcher' references undefined tools: 'missing'",
+            ):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    deps_type=ToolContext,
+                    tools=[Tool(increment, name="increment"), double],
+                )
+
+            agents.write_text(
+                agents.read_text()
+                .replace("missing", "increment")
+                .replace("ExtraInstructions", "MissingCapability")
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "Agent 'researcher' references undefined capabilities: "
+                "'MissingCapability'",
+            ):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    deps_type=ToolContext,
+                    tools=[Tool(increment, name="increment"), double],
+                    capabilities=[ExtraInstructions()],
+                )
 
     def test_uses_final_agent_output_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -137,11 +277,11 @@ class CrewTests(unittest.TestCase):
                 "  agent: composer\n"
             )
 
-            class StructuredCrew(Crew[ResearchOutput]):
-                agent_definition = agents
-                task_definition = tasks
-
-            crew = StructuredCrew(pydantic_models=[ResearchOutput])
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+                output_type=ResearchOutput,
+            )
 
             def respond(messages, info):
                 if not info.output_tools:
@@ -188,16 +328,16 @@ class CrewTests(unittest.TestCase):
                 "  agent: writer\n"
             )
 
-            class MismatchedCrew(Crew[ResearchOutput]):
-                agent_definition = agents
-                task_definition = tasks
-
             with self.assertRaisesRegex(
                 TypeError,
-                "MismatchedCrew declares crew output ResearchOutput, but final "
-                "task 'write' uses agent 'writer' with output str",
+                "Crew declares output ResearchOutput, but final task 'write' "
+                "uses agent 'writer' with output str",
             ):
-                MismatchedCrew(pydantic_models=[ResearchOutput])
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    output_type=ResearchOutput,
+                )
 
     def test_rejects_unknown_agent_output_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -212,30 +352,35 @@ class CrewTests(unittest.TestCase):
                 "  llm: test\n"
                 "  output_model: MissingOutput\n"
             )
-            tasks.write_text("{}\n")
-
-            class InvalidCrew(Crew):
-                agent_definition = agents
-                task_definition = tasks
+            tasks.write_text(
+                "research:\n"
+                "  description: Research\n"
+                "  expected_output: Findings\n"
+                "  agent: researcher\n"
+            )
 
             with self.assertRaisesRegex(
                 ValueError,
                 "Agent 'researcher' references undefined Pydantic model "
                 "'MissingOutput'",
             ):
-                InvalidCrew(pydantic_models=[ResearchOutput])
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    pydantic_models=[ResearchOutput],
+                )
 
     def test_requires_a_valid_llm_for_each_agent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             agents = root / "agents.yaml"
             tasks = root / "tasks.yaml"
-            tasks.write_text("{}\n")
-
-            class InvalidCrew(Crew):
-                agent_definition = agents
-                task_definition = tasks
-
+            tasks.write_text(
+                "research:\n"
+                "  description: Research\n"
+                "  expected_output: Findings\n"
+                "  agent: researcher\n"
+            )
             agents.write_text(
                 "researcher:\n"
                 "  role: Researcher\n"
@@ -243,7 +388,10 @@ class CrewTests(unittest.TestCase):
                 "  backstory: Curious\n"
             )
             with self.assertRaises(ValidationError):
-                InvalidCrew()
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                )
 
             agents.write_text(
                 "researcher:\n"
@@ -253,52 +401,27 @@ class CrewTests(unittest.TestCase):
                 "  llm: not-a-model\n"
             )
             with self.assertRaisesRegex(UserError, "Unknown model: not-a-model"):
-                InvalidCrew()
-
-    def test_requires_definition_overrides(self) -> None:
-        class MissingBoth(Crew):
-            pass
-
-        with self.assertRaisesRegex(
-            TypeError,
-            "MissingBoth must define agent_definition, task_definition",
-        ):
-            MissingBoth()
-
-        class MissingAgent(Crew):
-            task_definition = "tasks.yaml"
-
-        with self.assertRaisesRegex(
-            TypeError, "MissingAgent must define agent_definition"
-        ):
-            MissingAgent()
-
-        class MissingTask(Crew):
-            agent_definition = "agents.yaml"
-
-        with self.assertRaisesRegex(
-            TypeError, "MissingTask must define task_definition"
-        ):
-            MissingTask()
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                )
 
     def test_reports_each_missing_definition_file(self) -> None:
-        class MissingAgentCrew(Crew):
-            agent_definition = "missing-agents.yaml"
-            task_definition = "tasks.yaml"
-
         with self.assertRaisesRegex(
             FileNotFoundError, "agent_definition file not found"
         ):
-            MissingAgentCrew()
-
-        class MissingTaskCrew(Crew):
-            agent_definition = "agents.yaml"
-            task_definition = "missing-tasks.yaml"
+            Crew(
+                agent_definition="missing-agents.yaml",
+                task_definition="tasks.yaml",
+            )
 
         with self.assertRaisesRegex(
             FileNotFoundError, "task_definition file not found"
         ):
-            MissingTaskCrew()
+            Crew(
+                agent_definition="agents.yaml",
+                task_definition="missing-tasks.yaml",
+            )
 
     def test_requires_an_agent_for_each_task(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -318,12 +441,11 @@ class CrewTests(unittest.TestCase):
                 "  expected_output: A report\n"
             )
 
-            class InvalidCrew(Crew):
-                agent_definition = agents
-                task_definition = tasks
-
             with self.assertRaises(ValidationError):
-                InvalidCrew()
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                )
 
     def test_rejects_unknown_task_agent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -344,12 +466,11 @@ class CrewTests(unittest.TestCase):
                 "  agent: writer\n"
             )
 
-            class InvalidCrew(Crew):
-                agent_definition = agents
-                task_definition = tasks
-
             with self.assertRaisesRegex(ValueError, "undefined agent 'writer'"):
-                InvalidCrew()
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                )
 
 
 if __name__ == "__main__":

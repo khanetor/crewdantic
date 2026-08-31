@@ -1,0 +1,8 @@
+calculator:
+  role: Calculator
+  goal: Use the assigned arithmetic tools
+  backstory: A deterministic calculator
+  llm: test
+  tools:
+    - add_offset
+    - multiply

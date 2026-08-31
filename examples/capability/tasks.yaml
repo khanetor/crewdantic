@@ -1,0 +1,4 @@
+explain:
+  description: Explain reusable capabilities
+  expected_output: One short sentence
+  agent: writer
