@@ -46,6 +46,45 @@ class CrewTests(unittest.TestCase):
         self.assertFalse(hasattr(crew.agent_definitions["researcher"], "verbose"))
         self.assertFalse(hasattr(crew.task_definitions["research"], "markdown"))
 
+    def test_returns_mermaid_and_optionally_writes_mermaid_or_html(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tasks = root / "tasks.yaml"
+            tasks.write_text(
+                '"`research":\n'
+                "  description: Research\n"
+                "  expected_output: Facts\n"
+                "  agent: researcher\n"
+                "write:\n"
+                "  description: Write\n"
+                "  expected_output: Report\n"
+                "  agent: researcher\n"
+            )
+            crew = Crew(
+                agent_definition=Path(__file__).with_name("agents.yaml"),
+                task_definition=tasks,
+            )
+            expected = (
+                "flowchart LR\n"
+                '  task_0["#96;research<br/>agent: researcher"]\n'
+                '  task_1["write<br/>agent: researcher"]\n'
+                "  task_0 --> task_1"
+            )
+
+            mermaid = root / "crew.mermaid"
+            html = root / "crew.html"
+
+            self.assertEqual(crew.to_mermaid_chart(), expected)
+            self.assertIsNone(anyio.run(crew.render, mermaid))
+            self.assertEqual(mermaid.read_text(), expected)
+            self.assertIsNone(anyio.run(crew.render, html))
+            html_content = html.read_text()
+            self.assertIn("flowchart LR", html_content)
+            self.assertIn("mermaid@11", html_content)
+
+            with self.assertRaisesRegex(ValueError, ".mermaid or .html"):
+                anyio.run(crew.render, root / "crew.txt")
+
     def test_builds_agents_and_runs_tasks_sequentially(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

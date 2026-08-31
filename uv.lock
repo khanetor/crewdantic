@@ -421,6 +421,7 @@ name = "crewdantic"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "pydantic" },
     { name = "pydantic-ai" },
     { name = "pyyaml" },
@@ -428,6 +429,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pydantic-ai", specifier = ">=2.35.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },

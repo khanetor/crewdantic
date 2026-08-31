@@ -97,6 +97,17 @@ report = await crew.kickoff(
 Relative strings and `Path` values resolve beside the Python module that
 constructs the crew; absolute paths are used unchanged.
 
+`to_mermaid_chart()` returns the sequential task order as Mermaid source.
+`render()` asynchronously writes that chart to a `.mermaid` or `.html` file:
+
+```python
+mermaid = crew.to_mermaid_chart()
+await crew.render("research_crew.mermaid")
+await crew.render("research_crew.html")
+```
+
+HTML output loads Mermaid from its CDN when opened in a browser.
+
 `output_type` is automatically available to YAML `output_model` references.
 Pass `pydantic_models` only for additional structured output types used by
 intermediate agents.
