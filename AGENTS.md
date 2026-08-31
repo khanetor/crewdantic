@@ -8,7 +8,8 @@ Crewdantic is a minimal sequential crew abstraction over Pydantic AI. Agent and 
 
 - `src/crewdantic/crew.py`: YAML validation, agent construction, task execution, and output typing.
 - `tests/test_crew.py`: behavioral tests using Pydantic AI `FunctionModel`; no network access.
-- `examples/`: runnable examples. `research_crew.py` is the live structured-output smoke test using Gemini models.
+- `examples/basic/`: live structured-output smoke test using Gemini models.
+- `examples/shared_agents/`: two crews sharing agents across different task sets.
 
 ## Commands
 
@@ -23,7 +24,7 @@ uv run ruff format src tests examples
 Run the live example only with a key supplied through the environment:
 
 ```console
-GEMINI_API_KEY=... uv run python examples/research_crew.py
+GEMINI_API_KEY=... uv run python examples/basic/main.py
 ```
 
 Never store API keys in source, YAML, examples, tests, or `.env` files committed to Git.

@@ -1,0 +1,9 @@
+research:
+  description: Find the three most important facts about {topic}
+  expected_output: Three concise, accurate facts
+  agent: researcher
+
+compose:
+  description: Turn the research into a brief report about {topic}
+  expected_output: A topic, one-sentence summary, and three key points
+  agent: composer

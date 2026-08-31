@@ -1,0 +1,9 @@
+research:
+  description: Research {topic}
+  expected_output: A short set of accurate facts
+  agent: researcher
+
+compose:
+  description: Compose the final report about {topic} from the research
+  expected_output: A topic, concise summary, and three key points
+  agent: composer
