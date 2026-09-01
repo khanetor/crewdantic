@@ -134,21 +134,62 @@ inputs independently.
 Template values may be any Python object supported by string formatting,
 including lists, mappings, and Pydantic models.
 
+## Workflows
+
+`Workflow[InputT, OutputT]` builds a typed DAG from `@step` method
+parameters. Pass the immutable workflow input through the reserved
+`workflow_input` parameter; other parameter names refer to upstream steps.
+Every workflow ends at `final_step`, whose return annotation must match
+`OutputT`. Steps may be synchronous or asynchronous:
+
+```python
+from dataclasses import dataclass
+
+from crewdantic import Workflow, step
+
+
+@dataclass(frozen=True)
+class ReportInput:
+    topic: str
+
+
+@dataclass(frozen=True)
+class Report:
+    body: str
+
+
+class ReportWorkflow(Workflow[ReportInput, Report]):
+    @step
+    async def research(self, workflow_input: ReportInput) -> str:
+        return f"Research about {workflow_input.topic}"
+
+    @step
+    def final_step(self, research: str) -> Report:
+        return Report(body=research)
+
+
+report = await ReportWorkflow().kickoff(ReportInput(topic="workflows"))
+```
+
+Construction rejects undefined or mismatched dependencies, cycles, and steps
+that do not lead to `final_step`. Independent steps are resolved
+deterministically today.
+
 ## Examples
 
 The repository includes deterministic examples that require no API keys:
 
 ```console
+uv run python examples/workflow/main.py
 uv run python examples/tools/main.py
 uv run python examples/capability/main.py
 ```
 
-The tools example registers both a Pydantic AI `Tool` and a Python function.
-The capability example registers a custom reusable capability. Both select
-Pydantic AI's built-in `test` model in YAML, so application code needs no
-model override and the examples make no network calls.
+The workflow example runs a typed DAG using only Python dataclasses. The tools
+example registers both a Pydantic AI `Tool` and a Python function. The
+capability example registers a custom reusable capability. All three are
+deterministic and require no network access.
 
 ## Roadmap
 
 - Pydantic AI toolsets and MCP integration
-- Workflow orchestration
