@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 from dataclasses import dataclass
+from pathlib import Path
 from typing import assert_type
 
 import anyio
@@ -75,6 +77,80 @@ class WorkflowTests(unittest.TestCase):
         )
         self.assertCountEqual(workflow.calls[:-1], ["research", "market"])
         self.assertEqual(workflow.calls[-1], "final_step")
+
+    def test_visualizes_branching_dependencies_and_writes_outputs(self) -> None:
+        class BranchingWorkflow(Workflow[ReportInput, Report]):
+            @step
+            def source(self, workflow_input: ReportInput) -> str:
+                return workflow_input.topic
+
+            @step
+            def research(self, source: str) -> Research:
+                return Research(source)
+
+            @step
+            def market(self, source: str) -> Market:
+                return Market(source)
+
+            @step
+            def final_step(self, research: Research, market: Market) -> Report:
+                return Report("", research.finding, market.audience)
+
+        workflow = BranchingWorkflow()
+        expected = (
+            "flowchart LR\n"
+            '  step_0["source"]\n'
+            '  step_1["research"]\n'
+            '  step_2["market"]\n'
+            '  step_3["final_step<br/>final"]\n'
+            "  step_0 --> step_1\n"
+            "  step_0 --> step_2\n"
+            "  step_1 --> step_3\n"
+            "  step_2 --> step_3"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mermaid = root / "workflow.mermaid"
+            html = root / "workflow.html"
+
+            self.assertEqual(workflow.to_mermaid_chart(), expected)
+            self.assertIsNone(anyio.run(workflow.render, mermaid))
+            self.assertEqual(mermaid.read_text(), expected)
+            self.assertIsNone(anyio.run(workflow.render, html))
+            html_content = html.read_text()
+            self.assertIn("Workflow visualization", html_content)
+            self.assertIn("mermaid@11", html_content)
+
+            with self.assertRaisesRegex(ValueError, ".mermaid or .html"):
+                anyio.run(workflow.render, root / "workflow.txt")
+
+    def test_rejects_visualization_method_names_as_steps(self) -> None:
+        with self.assertRaisesRegex(TypeError, "'to_mermaid_chart' is reserved"):
+
+            class ChartStep(Workflow[ReportInput, Report]):
+                @step
+                def to_mermaid_chart(self) -> str:
+                    return "chart"
+
+                @step
+                def final_step(self, to_mermaid_chart: str) -> Report:
+                    return Report(to_mermaid_chart, "", "")
+
+        with self.assertRaisesRegex(TypeError, "'render' is reserved"):
+
+            class RenderStep(Workflow[ReportInput, Report]):
+                @step
+                def filename(self) -> str | Path:
+                    return "workflow.html"
+
+                @step
+                async def render(self, filename: str | Path) -> None:
+                    _ = filename
+
+                @step
+                def final_step(self, render: None) -> Report:
+                    return Report("", "", "")
 
     def test_requires_final_step(self) -> None:
         with self.assertRaisesRegex(TypeError, "named 'final_step'"):

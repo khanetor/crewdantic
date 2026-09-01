@@ -171,6 +171,18 @@ class ReportWorkflow(Workflow[ReportInput, Report]):
 report = await ReportWorkflow().kickoff(ReportInput(topic="workflows"))
 ```
 
+`to_mermaid_chart()` returns the declared step dependency graph as Mermaid
+source, including branches, joins, and a marked final step. `render()` writes
+that graph to `.mermaid` or Mermaid-backed `.html` output:
+
+```python
+workflow = ReportWorkflow()
+mermaid = workflow.to_mermaid_chart()
+await workflow.render("report_workflow.html")
+```
+
+HTML output loads Mermaid from its CDN when opened and requires network access.
+
 Construction rejects undefined or mismatched dependencies, cycles, and steps
 that do not lead to `final_step`. Independent steps are resolved
 deterministically today.
