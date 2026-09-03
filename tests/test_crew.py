@@ -17,6 +17,8 @@ from pydantic_ai import (
     Tool,
     ToolCallPart,
     ToolReturnPart,
+    UsageLimitExceeded,
+    UsageLimits,
     UserError,
     UserPromptPart,
 )
@@ -160,6 +162,314 @@ class CrewTests(unittest.TestCase):
             )
             self.assertIn("Role: Writer", requests[1][0])
             self.assertIn("Previous task output:\noutput 1", requests[1][1])
+
+    def test_runs_hierarchical_tasks_through_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "manager:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Find facts\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+                "writer:\n"
+                "  role: Writer\n"
+                "  goal: Explain facts\n"
+                "  backstory: Clear\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research bees\n"
+                "  expected_output: Verified facts\n"
+                "  agent: researcher\n"
+                "outline:\n"
+                "  description: Outline the report\n"
+                "  expected_output: A clear outline\n"
+                "compose:\n"
+                "  description: Compose the report\n"
+                "  expected_output: One structured finding\n"
+            )
+            worker_calls: list[tuple[str, str]] = []
+
+            def prompt_from(messages) -> str:
+                prompt = next(
+                    part.content
+                    for message in messages
+                    for part in message.parts
+                    if isinstance(part, UserPromptPart)
+                )
+                assert isinstance(prompt, str)
+                return prompt
+
+            def manage(messages, info):
+                prompt = prompt_from(messages)
+                tool_returns = [
+                    part
+                    for message in messages
+                    if isinstance(message, ModelRequest)
+                    for part in message.parts
+                    if isinstance(part, ToolReturnPart)
+                ]
+                self.assertEqual(
+                    {tool.name for tool in info.function_tools},
+                    {"ask_question", "delegate_work"},
+                )
+
+                if prompt.startswith("Research"):
+                    if not tool_returns:
+                        return ModelResponse(
+                            parts=[
+                                ToolCallPart(
+                                    tool_name="delegate_work",
+                                    args={
+                                        "task": "Find one bee fact",
+                                        "context": "The report is about bees",
+                                        "coworker": "researcher",
+                                    },
+                                    tool_call_id="research",
+                                ),
+                                ToolCallPart(
+                                    tool_name="ask_question",
+                                    args={
+                                        "question": "Can you write this?",
+                                        "context": "The report is about bees",
+                                        "coworker": "writer",
+                                    },
+                                    tool_call_id="disallowed",
+                                ),
+                            ]
+                        )
+                    self.assertEqual(
+                        {part.tool_call_id: part.content for part in tool_returns},
+                        {
+                            "research": "Worker findings",
+                            "disallowed": (
+                                "Unknown coworker 'writer'. "
+                                "Available coworkers: 'researcher'"
+                            ),
+                        },
+                    )
+                    return ModelResponse(parts=[TextPart(content="Managed research")])
+
+                if prompt.startswith("Outline"):
+                    self.assertIn("Managed research", prompt)
+                    if not tool_returns:
+                        return ModelResponse(
+                            parts=[
+                                ToolCallPart(
+                                    tool_name="ask_question",
+                                    args={
+                                        "question": "Suggest an outline",
+                                        "context": "Worker findings",
+                                        "coworker": "writer",
+                                    },
+                                    tool_call_id="outline",
+                                )
+                            ]
+                        )
+                    self.assertEqual(tool_returns[0].content, "Worker outline")
+                    return ModelResponse(parts=[TextPart(content="Managed outline")])
+
+                self.assertIn("Managed research", prompt)
+                self.assertIn("Managed outline", prompt)
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name=info.output_tools[0].name,
+                            args={"finding": "Bees communicate by dancing."},
+                        )
+                    ]
+                )
+
+            def work(messages, info):
+                prompt = prompt_from(messages)
+                worker_calls.append((info.instructions or "", prompt))
+                if prompt.startswith("Find"):
+                    return ModelResponse(parts=[TextPart(content="Worker findings")])
+                return ModelResponse(parts=[TextPart(content="Worker outline")])
+
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+                output_type=ResearchOutput,
+            )
+            self.assertTrue(crew.agent_definitions["manager"].manager)
+            self.assertFalse(crew.agent_definitions["researcher"].manager)
+            self.assertEqual(
+                crew.agent_definitions["manager"].role,
+                "Crew Manager",
+            )
+
+            with (
+                crew.agents["manager"].override(model=FunctionModel(manage)),
+                crew.agents["researcher"].override(model=FunctionModel(work)),
+                crew.agents["writer"].override(model=FunctionModel(work)),
+            ):
+                output = anyio.run(crew.kickoff)
+
+            self.assertEqual(
+                output,
+                ResearchOutput(finding="Bees communicate by dancing."),
+            )
+            self.assertEqual(len(worker_calls), 2)
+            self.assertIn("Role: Researcher", worker_calls[0][0])
+            self.assertIn("Find one bee fact", worker_calls[0][1])
+            self.assertIn("Role: Writer", worker_calls[1][0])
+            self.assertIn("Suggest an outline", worker_calls[1][1])
+            self.assertIn("manager: manager", crew.to_mermaid_chart())
+            self.assertIn("worker: any", crew.to_mermaid_chart())
+
+            with (
+                crew.agents["manager"].override(model=FunctionModel(manage)),
+                crew.agents["researcher"].override(model=FunctionModel(work)),
+                crew.agents["writer"].override(model=FunctionModel(work)),
+                self.assertRaises(UsageLimitExceeded),
+            ):
+                anyio.run(
+                    crew.kickoff,
+                    None,
+                    None,
+                    UsageLimits(request_limit=1),
+                )
+
+    def test_rejects_multiple_manager_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "first:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "second:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Work\n"
+                "  backstory: Capable\n"
+                "  llm: test\n"
+            )
+            tasks.write_text("work:\n  description: Work\n  expected_output: Result\n")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "multiple manager agents: 'first', 'second'",
+            ):
+                Crew(agent_definition=agents, task_definition=tasks)
+
+    def test_rejects_invalid_hierarchical_configurations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            manager = "manager:\n  manager: true\n  llm: test\n"
+            worker = (
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Work\n"
+                "  backstory: Capable\n"
+                "  llm: test\n"
+            )
+            task = "work:\n  description: Work\n  expected_output: Result\n"
+            cases = (
+                (
+                    "manager without worker",
+                    manager,
+                    task,
+                    ValueError,
+                    "at least one worker agent",
+                ),
+                (
+                    "task assigned to manager",
+                    worker + manager,
+                    task + "  agent: manager\n",
+                    ValueError,
+                    "cannot assign manager 'manager' as a worker",
+                ),
+                (
+                    "unknown worker",
+                    manager + worker,
+                    task + "  agent: missing\n",
+                    ValueError,
+                    "references undefined agent 'missing'",
+                ),
+                (
+                    "empty tasks",
+                    manager + worker,
+                    "{}\n",
+                    TypeError,
+                    "has no tasks",
+                ),
+            )
+
+            for name, agent_yaml, task_yaml, error_type, message in cases:
+                with self.subTest(name):
+                    agents.write_text(agent_yaml)
+                    tasks.write_text(task_yaml)
+                    with self.assertRaisesRegex(error_type, message):
+                        Crew(agent_definition=agents, task_definition=tasks)
+
+            agents.write_text(
+                "manager:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n" + worker
+            )
+            tasks.write_text(task)
+            with self.assertRaisesRegex(
+                TypeError,
+                "manager 'manager' with output ResearchOutput",
+            ):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    pydantic_models=[ResearchOutput],
+                )
+
+    def test_rejects_manager_delegation_tool_name_collisions(self) -> None:
+        def delegate_work(_ctx: RunContext[object]) -> str:
+            return "custom"
+
+        def ask_question(_ctx: RunContext[object]) -> str:
+            return "custom"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            tasks.write_text("work:\n  description: Work\n  expected_output: Result\n")
+
+            for tool in (delegate_work, ask_question):
+                with self.subTest(tool.__name__):
+                    agents.write_text(
+                        "manager:\n"
+                        "  manager: true\n"
+                        "  llm: test\n"
+                        "  tools:\n"
+                        f"    - {tool.__name__}\n"
+                        "worker:\n"
+                        "  role: Worker\n"
+                        "  goal: Work\n"
+                        "  backstory: Capable\n"
+                        "  llm: test\n"
+                    )
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"reserved delegation tools: '{tool.__name__}'",
+                    ):
+                        Crew(
+                            agent_definition=agents,
+                            task_definition=tasks,
+                            tools=[tool],
+                        )
 
     def test_supports_pydantic_ai_tools_capabilities_and_decorators(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -582,7 +892,7 @@ class CrewTests(unittest.TestCase):
                 "  expected_output: A report\n"
             )
 
-            with self.assertRaises(ValidationError):
+            with self.assertRaisesRegex(ValueError, "sequential crew"):
                 Crew(
                     agent_definition=agents,
                     task_definition=tasks,

@@ -6,16 +6,25 @@ from typing import Annotated, Any, Generic, cast
 
 import yaml  # type: ignore[import-untyped]
 from anyio import Path as AsyncPath
-from pydantic import BaseModel, Field, TypeAdapter
-from pydantic_ai import Agent, AgentCapability, Tool
+from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic_ai import (
+    Agent,
+    AgentCapability,
+    RunContext,
+    RunUsage,
+    Tool,
+    UsageLimitExceeded,
+    UsageLimits,
+)
 from pydantic_ai.tools import AgentDepsT, ToolFuncEither
-from pydantic_ai.toolsets import AgentToolset
+from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 from typing_extensions import TypeVar
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 
 
 class AgentDefinition(BaseModel):
+    manager: Annotated[bool, Field(default=False)]
     role: NonEmptyString
     goal: NonEmptyString
     backstory: NonEmptyString
@@ -25,20 +34,45 @@ class AgentDefinition(BaseModel):
     toolsets: Annotated[list[NonEmptyString], Field(default_factory=list)]
     capabilities: Annotated[list[NonEmptyString], Field(default_factory=list)]
 
+    @model_validator(mode="before")
+    @classmethod
+    def add_manager_defaults(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and value.get("manager") is True:
+            return {
+                "role": "Crew Manager",
+                "goal": "Coordinate workers and produce the requested output.",
+                "backstory": (
+                    "You delegate work to specialists, evaluate their responses, "
+                    "and synthesize the final result."
+                ),
+                **value,
+            }
+        return value
+
 
 class TaskDefinition(BaseModel):
     description: NonEmptyString
     expected_output: NonEmptyString
-    agent: NonEmptyString
+    agent: Annotated[NonEmptyString | None, Field(default=None)]
 
 
-Definition = TypeVar("Definition")
+_Definition = TypeVar("_Definition")
 CrewOutputT = TypeVar("CrewOutputT", bound=BaseModel | str, default=str)
+_DelegationDepsT = TypeVar("_DelegationDepsT")
 _AGENT_DEFINITIONS = TypeAdapter(dict[str, AgentDefinition])
 _TASK_DEFINITIONS = TypeAdapter(dict[str, TaskDefinition])
 
 
-def _load_yaml(path: Path, adapter: TypeAdapter[Definition]) -> Definition:
+def _definition_path(attribute: str, definition: str | Path, root: Path) -> Path:
+    path = Path(definition)
+    if not path.is_absolute():
+        path = root / path
+    if not path.is_file():
+        raise FileNotFoundError(f"{attribute} file not found: {path}")
+    return path
+
+
+def _load_yaml(path: Path, adapter: TypeAdapter[_Definition]) -> _Definition:
     with path.open(encoding="utf-8") as definition_file:
         return adapter.validate_python(yaml.safe_load(definition_file))
 
@@ -64,21 +98,16 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         definition_root = Path(frame.f_back.f_code.co_filename).resolve().parent
         del frame
         self.agent_definitions = _load_yaml(
-            self._definition_path(
-                "agent_definition", agent_definition, definition_root
-            ),
+            _definition_path("agent_definition", agent_definition, definition_root),
             _AGENT_DEFINITIONS,
         )
         self.task_definitions = _load_yaml(
-            self._definition_path("task_definition", task_definition, definition_root),
+            _definition_path("task_definition", task_definition, definition_root),
             _TASK_DEFINITIONS,
         )
 
-        for task_name, task in self.task_definitions.items():
-            if task.agent not in self.agent_definitions:
-                raise ValueError(
-                    f"Task {task_name!r} references undefined agent {task.agent!r}"
-                )
+        self.manager_name = self._find_manager_name()
+        self._validate_task_assignments()
 
         registered_tools = {
             tool.name if isinstance(tool, Tool) else cast(Any, tool).__name__: tool
@@ -111,6 +140,17 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                         + ", ".join(repr(name) for name in sorted(undefined))
                     )
 
+        if self.manager_name is not None:
+            conflicting_tools = {"ask_question", "delegate_work"}.intersection(
+                self.agent_definitions[self.manager_name].tools
+            )
+            if conflicting_tools:
+                raise ValueError(
+                    f"Manager {self.manager_name!r} cannot define reserved "
+                    "delegation tools: "
+                    + ", ".join(repr(name) for name in sorted(conflicting_tools))
+                )
+
         variables = agent_variables or {}
         output_models = {model.__name__: model for model in pydantic_models}
         if output_type is not str:
@@ -124,24 +164,8 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     f"Agent {agent_name!r} references undefined Pydantic model "
                     f"{definition.output_model!r}"
                 )
-        if not self.task_definitions:
-            raise TypeError(
-                f"Crew declares output {output_type.__name__} but has no tasks"
-            )
-        final_task_name = next(reversed(self.task_definitions))
-        final_task = self.task_definitions[final_task_name]
-        final_definition = self.agent_definitions[final_task.agent]
-        final_output_type = (
-            output_models[final_definition.output_model]
-            if final_definition.output_model is not None
-            else str
-        )
-        if final_output_type is not output_type:
-            raise TypeError(
-                f"Crew declares output {output_type.__name__}, but final task "
-                f"{final_task_name!r} uses agent {final_task.agent!r} "
-                f"with output {final_output_type.__name__}"
-            )
+        self._validate_output_type(output_type, output_models)
+        self._output_type = output_type
 
         self.agents: dict[str, Agent[AgentDepsT, BaseModel | str]] = {
             name: Agent(
@@ -170,14 +194,75 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
             for name, definition in self.agent_definitions.items()
         }
 
+    async def kickoff(
+        self,
+        inputs: Mapping[str, object] | None = None,
+        context: AgentDepsT | None = None,
+        usage_limits: UsageLimits | None = None,
+    ) -> CrewOutputT:
+        values = inputs or {}
+        usage = RunUsage()
+        limits = usage_limits or UsageLimits()
+        previous_outputs: list[BaseModel | str] = []
+
+        for index, task in enumerate(self.task_definitions.values()):
+            prompt = (
+                f"{task.description.format_map(values)}\n\n"
+                f"Expected output:\n{task.expected_output.format_map(values)}"
+            )
+            if previous_outputs:
+                if self.manager_name is None:
+                    prompt += f"\n\nPrevious task output:\n{previous_outputs[-1]}"
+                else:
+                    prompt += "\n\nPrevious task outputs:\n" + "\n\n".join(
+                        str(output) for output in previous_outputs
+                    )
+
+            if self.manager_name is None:
+                assert task.agent is not None
+                result = await self.agents[task.agent].run(
+                    prompt,
+                    deps=cast(AgentDepsT, context),
+                    usage=usage,
+                    usage_limits=limits,
+                )
+            else:
+                coworkers = {
+                    name: agent
+                    for name, agent in self.agents.items()
+                    if name != self.manager_name
+                    and (task.agent is None or name == task.agent)
+                }
+                result = await self.agents[self.manager_name].run(
+                    prompt,
+                    output_type=(
+                        self._output_type
+                        if index == len(self.task_definitions) - 1
+                        else str
+                    ),
+                    deps=cast(AgentDepsT, context),
+                    usage=usage,
+                    usage_limits=limits,
+                    toolsets=[self._delegation_toolset(coworkers)],
+                )
+            previous_outputs.append(result.output)
+
+        return cast(CrewOutputT, previous_outputs[-1])
+
     def to_mermaid_chart(self) -> str:
         def label(value: str) -> str:
             return escape(" ".join(value.split())).replace("`", "#96;")
 
-        nodes = [
-            f'  task_{index}["{label(name)}<br/>agent: {label(task.agent)}"]'
-            for index, (name, task) in enumerate(self.task_definitions.items())
-        ]
+        nodes = []
+        for index, (name, task) in enumerate(self.task_definitions.items()):
+            if self.manager_name is None:
+                assignment = f"agent: {label(task.agent or '')}"
+            else:
+                assignment = (
+                    f"manager: {label(self.manager_name)}<br/>"
+                    f"worker: {label(task.agent or 'any')}"
+                )
+            nodes.append(f'  task_{index}["{label(name)}<br/>{assignment}"]')
         edges = [
             f"  task_{index} --> task_{index + 1}" for index in range(len(nodes) - 1)
         ]
@@ -204,7 +289,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
 </head>
 <body>
   <main>
-    <pre class="mermaid" aria-label="Sequential crew task graph">{escape(diagram)}</pre>
+    <pre class="mermaid" aria-label="Crew task graph">{escape(diagram)}</pre>
   </main>
   <script type="module">
     import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
@@ -219,34 +304,118 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
 
         await AsyncPath(output).write_text(content, encoding="utf-8")
 
-    async def kickoff(
+    def _find_manager_name(self) -> str | None:
+        manager_names = [
+            name
+            for name, definition in self.agent_definitions.items()
+            if definition.manager
+        ]
+        if len(manager_names) > 1:
+            raise ValueError(
+                "Crew defines multiple manager agents: "
+                + ", ".join(repr(name) for name in manager_names)
+            )
+        manager_name = manager_names[0] if manager_names else None
+        if manager_name is not None and len(self.agent_definitions) == 1:
+            raise ValueError("A hierarchical crew requires at least one worker agent")
+        return manager_name
+
+    def _validate_task_assignments(self) -> None:
+        for task_name, task in self.task_definitions.items():
+            if task.agent is None:
+                if self.manager_name is None:
+                    raise ValueError(
+                        f"Task {task_name!r} must declare an agent in a sequential crew"
+                    )
+            elif task.agent not in self.agent_definitions:
+                raise ValueError(
+                    f"Task {task_name!r} references undefined agent {task.agent!r}"
+                )
+            elif task.agent == self.manager_name:
+                raise ValueError(
+                    f"Task {task_name!r} cannot assign manager {task.agent!r} as a worker"
+                )
+
+    def _validate_output_type(
         self,
-        inputs: Mapping[str, object] | None = None,
-        context: AgentDepsT | None = None,
-    ) -> CrewOutputT:
-        values = inputs or {}
-        previous_output: BaseModel | str | None = None
-
-        for task in self.task_definitions.values():
-            prompt = (
-                f"{task.description.format_map(values)}\n\n"
-                f"Expected output:\n{task.expected_output.format_map(values)}"
+        output_type: type[CrewOutputT],
+        output_models: Mapping[str, type[BaseModel]],
+    ) -> None:
+        if not self.task_definitions:
+            raise TypeError(
+                f"Crew declares output {output_type.__name__} but has no tasks"
             )
-            if previous_output is not None:
-                prompt += f"\n\nPrevious task output:\n{previous_output}"
-
-            result = await self.agents[task.agent].run(
-                prompt, deps=cast(AgentDepsT, context)
-            )
-            previous_output = result.output
-
-        return cast(CrewOutputT, previous_output if previous_output is not None else "")
+        final_task_name = next(reversed(self.task_definitions))
+        final_agent_name = (
+            self.manager_name or self.task_definitions[final_task_name].agent
+        )
+        assert final_agent_name is not None
+        final_definition = self.agent_definitions[final_agent_name]
+        final_output_type = (
+            output_models[final_definition.output_model]
+            if final_definition.output_model is not None
+            else str
+        )
+        if final_output_type is output_type:
+            return
+        if self.manager_name is not None:
+            source = f"manager {self.manager_name!r}"
+        else:
+            source = f"final task {final_task_name!r} uses agent {final_agent_name!r}"
+        raise TypeError(
+            f"Crew declares output {output_type.__name__}, but {source} "
+            f"with output {final_output_type.__name__}"
+        )
 
     @staticmethod
-    def _definition_path(attribute: str, definition: str | Path, root: Path) -> Path:
-        path = Path(definition)
-        if not path.is_absolute():
-            path = root / path
-        if not path.is_file():
-            raise FileNotFoundError(f"{attribute} file not found: {path}")
-        return path
+    def _delegation_toolset(
+        coworkers: Mapping[str, Agent[_DelegationDepsT, BaseModel | str]],
+    ) -> FunctionToolset[_DelegationDepsT]:
+        available = ", ".join(repr(name) for name in coworkers)
+
+        async def run_coworker(
+            ctx: RunContext[_DelegationDepsT],
+            coworker: str,
+            request: str,
+            context: str,
+        ) -> BaseModel | str:
+            agent = coworkers.get(coworker)
+            if agent is None:
+                return (
+                    f"Unknown coworker {coworker!r}. Available coworkers: {available}"
+                )
+            try:
+                result = await agent.run(
+                    f"{request}\n\nContext:\n{context}",
+                    deps=ctx.deps,
+                    usage=ctx.usage,
+                    usage_limits=ctx.usage_limits,
+                )
+            except UsageLimitExceeded:
+                raise
+            except Exception as error:  # noqa: BLE001
+                return f"Coworker {coworker!r} failed: {error}"
+            return result.output
+
+        async def delegate_work(
+            ctx: RunContext[_DelegationDepsT],
+            task: str,
+            context: str,
+            coworker: str,
+        ) -> BaseModel | str:
+            """Delegate a task to a coworker with all context needed to complete it."""
+            return await run_coworker(ctx, coworker, task, context)
+
+        async def ask_question(
+            ctx: RunContext[_DelegationDepsT],
+            question: str,
+            context: str,
+            coworker: str,
+        ) -> BaseModel | str:
+            """Ask a coworker a question with all context needed to answer it."""
+            return await run_coworker(ctx, coworker, question, context)
+
+        return FunctionToolset(
+            [delegate_work, ask_question],
+            instructions=f"Available coworkers: {available}",
+        )

@@ -70,9 +70,11 @@ compose:
 `Crew(...)` turns each agent declaration into a Pydantic AI `Agent`.
 Every agent must declare a Pydantic AI model name as `llm`; invalid names fail
 during crew construction. Agents return text unless they declare
-`output_model`, matching a registered Pydantic model class name. `kickoff()`
-runs tasks in YAML order, passes each output to the next task, and returns the
-final task's agent output.
+`output_model`, matching a registered Pydantic model class name.
+
+Without a manager, `kickoff()` runs tasks sequentially in YAML order, passes
+each output to the next task, and returns the final task's agent output. Every
+sequential task must name its agent.
 
 `output_type` defaults to `str`, and `deps_type` defaults to `object`. Supplying
 them gives static type checkers the final output and shared Pydantic AI context
@@ -94,10 +96,37 @@ report = await crew.kickoff(
 )
 ```
 
+A single agent with `manager: true` makes the crew hierarchical:
+
+```yaml
+manager:
+  manager: true
+  llm: openai:gpt-5.2
+  output_model: ResearchOutput
+researcher:
+  role: Researcher
+  goal: Find authoritative evidence
+  backstory: An experienced researcher
+  llm: openai:gpt-5.2
+writer:
+  role: Writer
+  goal: Explain the evidence clearly
+  backstory: An experienced technical writer
+  llm: openai:gpt-5.2
+```
+
+Manager role, goal, and backstory have defaults and can be overridden. Only one
+manager is allowed. The manager runs tasks in YAML order and receives
+`delegate_work` and `ask_question` tools. A task with an `agent` restricts those
+tools to that worker; an unassigned task allows every non-manager agent. The
+manager's `output_model` determines the final crew output type, while
+intermediate manager outputs are text. `usage_limits` passed to `kickoff()`
+apply across manager and worker model calls.
+
 Relative strings and `Path` values resolve beside the Python module that
 constructs the crew; absolute paths are used unchanged.
 
-`to_mermaid_chart()` returns the sequential task order as Mermaid source.
+`to_mermaid_chart()` returns the declared task order as Mermaid source.
 `render()` asynchronously writes that chart to a `.mermaid` or `.html` file:
 
 ```python
