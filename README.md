@@ -72,9 +72,11 @@ Every agent must declare a Pydantic AI model name as `llm`; invalid names fail
 during crew construction. Agents return text unless they declare
 `output_model`, matching a registered Pydantic model class name.
 
-Without a manager, `kickoff()` runs tasks sequentially in YAML order, passes
-each output to the next task, and returns the final task's agent output. Every
-sequential task must name its agent.
+`kickoff()` runs tasks in YAML order and returns the final task's agent output.
+Each task receives all previous task outputs by default in both sequential and
+hierarchical crews. Set `context` to a list of earlier task names to select only
+those outputs; `context: []` or `context: null` supplies none. Without a
+manager, every task must name its agent.
 
 `output_type` defaults to `str`, and `deps_type` defaults to `object`. Supplying
 them gives static type checkers the final output and shared Pydantic AI context
