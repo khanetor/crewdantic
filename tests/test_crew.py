@@ -161,7 +161,116 @@ class CrewTests(unittest.TestCase):
                 requests[0][1],
             )
             self.assertIn("Role: Writer", requests[1][0])
-            self.assertIn("Previous task output:\noutput 1", requests[1][1])
+            self.assertIn("Previous task outputs:\noutput 1", requests[1][1])
+
+    def test_uses_all_or_selected_previous_task_outputs_as_context(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Complete tasks\n"
+                "  backstory: Reliable\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "first:\n"
+                "  description: First\n"
+                "  expected_output: First output\n"
+                "  agent: worker\n"
+                "second:\n"
+                "  description: Second\n"
+                "  expected_output: Second output\n"
+                "  agent: worker\n"
+                "third:\n"
+                "  description: Third\n"
+                "  expected_output: Third output\n"
+                "  agent: worker\n"
+                "selected:\n"
+                "  description: Selected\n"
+                "  expected_output: Selected output\n"
+                "  agent: worker\n"
+                "  context:\n"
+                "    - first\n"
+                "    - third\n"
+                "empty:\n"
+                "  description: Empty\n"
+                "  expected_output: Empty output\n"
+                "  agent: worker\n"
+                "  context: []\n"
+                '"null":\n'
+                "  description: No context\n"
+                "  expected_output: Null output\n"
+                "  agent: worker\n"
+                "  context: null\n"
+            )
+            prompts: list[str] = []
+
+            def respond(messages, _info):
+                prompt = next(
+                    part.content
+                    for message in reversed(messages)
+                    if isinstance(message, ModelRequest)
+                    for part in message.parts
+                    if isinstance(part, UserPromptPart)
+                )
+                assert isinstance(prompt, str)
+                prompts.append(prompt)
+                return ModelResponse(parts=[TextPart(content=f"output {len(prompts)}")])
+
+            crew = Crew(agent_definition=agents, task_definition=tasks)
+            with crew.agents["worker"].override(model=FunctionModel(respond)):
+                output = anyio.run(crew.kickoff)
+
+            self.assertEqual(output, "output 6")
+            self.assertNotIn("Previous task output", prompts[0])
+            self.assertTrue(
+                prompts[1].endswith("Previous task outputs:\noutput 1"),
+                prompts[1],
+            )
+            self.assertTrue(
+                prompts[2].endswith("Previous task outputs:\noutput 1\n\noutput 2"),
+                prompts[2],
+            )
+            self.assertTrue(
+                prompts[3].endswith("Previous task outputs:\noutput 1\n\noutput 3"),
+                prompts[3],
+            )
+            self.assertNotIn("output 2", prompts[3])
+            self.assertNotIn("Previous task output", prompts[4])
+            self.assertNotIn("Previous task output", prompts[5])
+
+    def test_rejects_context_references_to_non_previous_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agents = root / "agents.yaml"
+            tasks = root / "tasks.yaml"
+            agents.write_text(
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Complete tasks\n"
+                "  backstory: Reliable\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "first:\n"
+                "  description: First\n"
+                "  expected_output: First output\n"
+                "  agent: worker\n"
+                "  context: [later]\n"
+                "later:\n"
+                "  description: Later\n"
+                "  expected_output: Later output\n"
+                "  agent: worker\n"
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Task 'first' context references non-previous task 'later'",
+            ):
+                Crew(agent_definition=agents, task_definition=tasks)
 
     def test_runs_hierarchical_tasks_through_manager(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -54,6 +54,7 @@ class TaskDefinition(BaseModel):
     description: NonEmptyString
     expected_output: NonEmptyString
     agent: Annotated[NonEmptyString | None, Field(default=None)]
+    context: Annotated[list[NonEmptyString] | None, Field(default=None)]
 
 
 _Definition = TypeVar("_Definition")
@@ -203,20 +204,22 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         values = inputs or {}
         usage = RunUsage()
         limits = usage_limits or UsageLimits()
-        previous_outputs: list[BaseModel | str] = []
+        task_outputs: dict[str, BaseModel | str] = {}
 
-        for index, task in enumerate(self.task_definitions.values()):
+        for index, (task_name, task) in enumerate(self.task_definitions.items()):
             prompt = (
                 f"{task.description.format_map(values)}\n\n"
                 f"Expected output:\n{task.expected_output.format_map(values)}"
             )
-            if previous_outputs:
-                if self.manager_name is None:
-                    prompt += f"\n\nPrevious task output:\n{previous_outputs[-1]}"
-                else:
-                    prompt += "\n\nPrevious task outputs:\n" + "\n\n".join(
-                        str(output) for output in previous_outputs
-                    )
+            context_outputs = (
+                list(task_outputs.values())
+                if "context" not in task.model_fields_set
+                else [task_outputs[name] for name in task.context or []]
+            )
+            if context_outputs:
+                prompt += "\n\nPrevious task outputs:\n" + "\n\n".join(
+                    str(output) for output in context_outputs
+                )
 
             if self.manager_name is None:
                 assert task.agent is not None
@@ -245,9 +248,9 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     usage_limits=limits,
                     toolsets=[self._delegation_toolset(coworkers)],
                 )
-            previous_outputs.append(result.output)
+            task_outputs[task_name] = result.output
 
-        return cast(CrewOutputT, previous_outputs[-1])
+        return cast(CrewOutputT, next(reversed(task_outputs.values())))
 
     def to_mermaid_chart(self) -> str:
         def label(value: str) -> str:
@@ -321,7 +324,14 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         return manager_name
 
     def _validate_task_assignments(self) -> None:
+        previous_tasks: set[str] = set()
         for task_name, task in self.task_definitions.items():
+            for context_task in task.context or []:
+                if context_task not in previous_tasks:
+                    raise ValueError(
+                        f"Task {task_name!r} context references non-previous task "
+                        f"{context_task!r}"
+                    )
             if task.agent is None:
                 if self.manager_name is None:
                     raise ValueError(
@@ -335,6 +345,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 raise ValueError(
                     f"Task {task_name!r} cannot assign manager {task.agent!r} as a worker"
                 )
+            previous_tasks.add(task_name)
 
     def _validate_output_type(
         self,
