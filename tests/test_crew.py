@@ -1,11 +1,13 @@
 import tempfile
 import unittest
-from contextlib import ExitStack
+from collections.abc import AsyncIterator
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import assert_type
 
 import anyio
+from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import (
     ModelRequest,
@@ -18,7 +20,8 @@ from pydantic_ai import (
     UserError,
     UserPromptPart,
 )
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import MCP, AbstractCapability
+from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.function import FunctionModel
 
 from crewdantic import Crew
@@ -286,6 +289,105 @@ class CrewTests(unittest.TestCase):
                     tools=[Tool(increment, name="increment"), double],
                     capabilities=[ExtraInstructions()],
                 )
+
+    def test_supports_mcp_capabilities_and_toolsets(self) -> None:
+        def exercise(yaml_key: str) -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                agents = root / "agents.yaml"
+                tasks = root / "tasks.yaml"
+                agents.write_text(
+                    "researcher:\n"
+                    "  role: Researcher\n"
+                    "  goal: Use MCP tools\n"
+                    "  backstory: Connected\n"
+                    "  llm: test\n"
+                    f"  {yaml_key}:\n"
+                    "    - math\n"
+                )
+                tasks.write_text(
+                    "research:\n"
+                    "  description: Calculate\n"
+                    "  expected_output: A result\n"
+                    "  agent: researcher\n"
+                )
+                lifecycle: list[str] = []
+                calls: list[int] = []
+
+                @asynccontextmanager
+                async def lifespan(_: FastMCP[None]) -> AsyncIterator[None]:
+                    lifecycle.append("start")
+                    try:
+                        yield None
+                    finally:
+                        lifecycle.append("stop")
+
+                server = FastMCP("math", lifespan=lifespan)
+
+                @server.tool()
+                def increment(value: int) -> int:
+                    calls.append(value)
+                    return value + 1
+
+                def build_crew():
+                    if yaml_key == "capabilities":
+                        return Crew(
+                            agent_definition=agents,
+                            task_definition=tasks,
+                            capabilities=[MCP(local=server, id="math")],
+                        )
+                    return Crew(
+                        agent_definition=agents,
+                        task_definition=tasks,
+                        toolsets={"math": MCPToolset(server, id="math")},
+                    )
+
+                crew = build_crew()
+
+                def respond(_messages, info):
+                    if not calls:
+                        self.assertEqual(
+                            {tool.name for tool in info.function_tools}, {"increment"}
+                        )
+                        return ModelResponse(
+                            parts=[
+                                ToolCallPart(
+                                    tool_name="increment",
+                                    args={"value": 2},
+                                    tool_call_id="increment",
+                                )
+                            ]
+                        )
+                    return ModelResponse(parts=[TextPart(content="MCP worked")])
+
+                with crew.agents["researcher"].override(model=FunctionModel(respond)):
+                    output = anyio.run(crew.kickoff)
+
+                self.assertEqual(output, "MCP worked")
+                self.assertEqual(calls, [2])
+                self.assertEqual(lifecycle, ["start", "stop"])
+
+                def fail(_messages, _info):
+                    raise RuntimeError("model failed")
+
+                with (
+                    crew.agents["researcher"].override(model=FunctionModel(fail)),
+                    self.assertRaisesRegex(RuntimeError, "model failed"),
+                ):
+                    anyio.run(crew.kickoff)
+
+                self.assertEqual(lifecycle, ["start", "stop", "start", "stop"])
+
+                agents.write_text(agents.read_text().replace("math", "missing"))
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"Agent 'researcher' references undefined {yaml_key}: 'missing'",
+                ):
+                    build_crew()
+
+        for yaml_key in ("capabilities", "toolsets"):
+            with self.subTest(yaml_key=yaml_key):
+                exercise(yaml_key)
 
     def test_uses_final_agent_output_model(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

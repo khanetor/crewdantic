@@ -9,6 +9,7 @@ from anyio import Path as AsyncPath
 from pydantic import BaseModel, Field, TypeAdapter
 from pydantic_ai import Agent, AgentCapability, Tool
 from pydantic_ai.tools import AgentDepsT, ToolFuncEither
+from pydantic_ai.toolsets import AgentToolset
 from typing_extensions import TypeVar
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
@@ -21,6 +22,7 @@ class AgentDefinition(BaseModel):
     llm: NonEmptyString
     output_model: Annotated[NonEmptyString | None, Field(default=None)]
     tools: Annotated[list[NonEmptyString], Field(default_factory=list)]
+    toolsets: Annotated[list[NonEmptyString], Field(default_factory=list)]
     capabilities: Annotated[list[NonEmptyString], Field(default_factory=list)]
 
 
@@ -52,6 +54,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         agent_variables: Mapping[str, object] | None = None,
         pydantic_models: Sequence[type[BaseModel]] = (),
         tools: Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]] = (),
+        toolsets: Mapping[str, AgentToolset[AgentDepsT]] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
     ) -> None:
         output_type = cast(type[CrewOutputT], output_type or str)
@@ -83,6 +86,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         }
         if len(registered_tools) != len(tools):
             raise ValueError("Tool names must be unique")
+        registered_toolsets = toolsets or {}
 
         registered_capabilities = {
             (
@@ -97,6 +101,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         for agent_name, definition in self.agent_definitions.items():
             for kind, assigned, registered in (
                 ("tools", definition.tools, registered_tools),
+                ("toolsets", definition.toolsets, registered_toolsets),
                 ("capabilities", definition.capabilities, registered_capabilities),
             ):
                 undefined = set(assigned) - registered.keys()
@@ -154,6 +159,9 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     f"Backstory: {definition.backstory.format_map(variables)}"
                 ),
                 tools=[registered_tools[tool] for tool in definition.tools],
+                toolsets=[
+                    registered_toolsets[toolset] for toolset in definition.toolsets
+                ],
                 capabilities=[
                     registered_capabilities[capability]
                     for capability in definition.capabilities

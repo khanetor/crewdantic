@@ -112,21 +112,78 @@ HTML output loads Mermaid from its CDN when opened in a browser.
 Pass `pydantic_models` only for additional structured output types used by
 intermediate agents.
 
-Pydantic AI context-aware tool callables, `Tool` instances, and capabilities
-are supplied once through the constructor and assigned to agents by name in
-`agents.yaml`.
+Pydantic AI context-aware tool callables, `Tool` instances, toolsets, and
+capabilities are supplied once through the constructor and assigned to agents
+by name in `agents.yaml`.
 
-Callable names, `Tool.name`, and capability IDs or class names are used for
-YAML lookup. Function tools take `RunContext[ResearchContext]`; the context
-type is applied to every generated Pydantic AI agent, and `kickoff()` forwards
-the context instance to every task. Tools can also be registered on a
-constructed agent with Pydantic AI's decorators:
+Callable names, `Tool.name`, toolset mapping keys, and capability IDs or class
+names are used for YAML lookup. Function tools take
+`RunContext[ResearchContext]`; the context type is applied to every generated
+Pydantic AI agent, and `kickoff()` forwards the context instance to every task.
+Tools can also be registered on a constructed agent with Pydantic AI's
+decorators:
 
 ```python
 @crew.agents["researcher"].tool
 def word_count(_ctx: RunContext[ResearchContext], text: str) -> int:
     return len(text.split())
 ```
+
+For MCP, prefer Pydantic AI's `MCP` capability. Register it in Python and
+assign its `id` in YAML:
+
+```yaml
+researcher:
+  role: Researcher
+  goal: Use the filesystem
+  backstory: Careful
+  llm: openai:gpt-5.2
+  capabilities:
+    - filesystem
+```
+
+```python
+from pydantic_ai.capabilities import MCP
+
+crew = Crew(
+    agent_definition="agents.yaml",
+    task_definition="tasks.yaml",
+    capabilities=[
+        MCP("https://mcp.example.com/api", id="filesystem"),
+    ],
+)
+```
+
+Use a direct `MCPToolset` when its lower-level client configuration or shared
+instance is needed:
+
+```yaml
+researcher:
+  role: Researcher
+  goal: Use the filesystem
+  backstory: Careful
+  llm: openai:gpt-5.2
+  toolsets:
+    - filesystem
+```
+
+```python
+from pydantic_ai.mcp import MCPToolset
+
+crew = Crew(
+    agent_definition="agents.yaml",
+    task_definition="tasks.yaml",
+    toolsets={
+        "filesystem": MCPToolset("https://mcp.example.com/api"),
+    },
+)
+```
+
+Any Pydantic AI `AgentToolset` can be a mapping value. Undefined capability
+and toolset references fail during crew construction. Pydantic AI manages
+their native run lifecycle, including cleanup when model or tool execution
+fails. URL-based configurations require an MCP server already running at that
+address.
 
 Agent roles, goals, and backstories interpolate `agent_variables` during crew
 construction. Task descriptions and expected outputs interpolate `kickoff()`
@@ -201,7 +258,3 @@ The workflow example runs a typed DAG using only Python dataclasses. The tools
 example registers both a Pydantic AI `Tool` and a Python function. The
 capability example registers a custom reusable capability. All three are
 deterministic and require no network access.
-
-## Roadmap
-
-- Pydantic AI toolsets and MCP integration
