@@ -2,7 +2,6 @@ import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from graphlib import CycleError, TopologicalSorter
-from html import escape
 from pathlib import Path
 from typing import (
     ClassVar,
@@ -14,7 +13,7 @@ from typing import (
     get_type_hints,
 )
 
-from anyio import Path as AsyncPath
+from ._visualization import write_visualization
 
 WorkflowInputT = TypeVar("WorkflowInputT")
 WorkflowOutputT = TypeVar("WorkflowOutputT")
@@ -170,41 +169,8 @@ class Workflow(Generic[WorkflowInputT, WorkflowOutputT]):
         ]
         return "\n".join(("flowchart LR", *nodes, *edges))
 
-    async def render(self, filename: str | Path) -> None:
-        diagram = self.to_mermaid_chart()
-        output = Path(filename)
-        match output.suffix.casefold():
-            case ".mermaid":
-                content = diagram
-            case ".html":
-                content = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Workflow visualization</title>
-  <style>
-    body {{ margin: 0; font-family: system-ui, sans-serif; }}
-    main {{ min-height: 100vh; display: grid; place-items: center; }}
-    .mermaid {{ max-width: 100%; overflow: auto; }}
-  </style>
-</head>
-<body>
-  <main>
-    <pre class="mermaid" aria-label="Workflow step dependency graph">{escape(diagram)}</pre>
-  </main>
-  <script type="module">
-    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-  </script>
-</body>
-</html>
-"""
-            case suffix:
-                raise ValueError(
-                    f"Visualization output must end in .mermaid or .html, not {suffix!r}"
-                )
-
-        await AsyncPath(output).write_text(content, encoding="utf-8")
+    def render(self, filename: str | Path) -> None:
+        write_visualization(self.to_mermaid_chart(), filename)
 
     async def kickoff(self, workflow_input: WorkflowInputT) -> WorkflowOutputT:
         outputs: dict[str, object] = {}

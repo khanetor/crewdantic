@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Annotated, Any, Generic, cast
 
 import yaml  # type: ignore[import-untyped]
-from anyio import Path as AsyncPath
 from pydantic import BaseModel, Field, TypeAdapter, model_validator
 from pydantic_ai import (
     Agent,
@@ -19,6 +18,8 @@ from pydantic_ai import (
 from pydantic_ai.tools import AgentDepsT, ToolFuncEither
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 from typing_extensions import TypeVar
+
+from ._visualization import write_visualization
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
 
@@ -271,41 +272,8 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         ]
         return "\n".join(("flowchart LR", *nodes, *edges))
 
-    async def render(self, filename: str | Path) -> None:
-        diagram = self.to_mermaid_chart()
-        output = Path(filename)
-        match output.suffix.casefold():
-            case ".mermaid":
-                content = diagram
-            case ".html":
-                content = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Crew visualization</title>
-  <style>
-    body {{ margin: 0; font-family: system-ui, sans-serif; }}
-    main {{ min-height: 100vh; display: grid; place-items: center; }}
-    .mermaid {{ max-width: 100%; overflow: auto; }}
-  </style>
-</head>
-<body>
-  <main>
-    <pre class="mermaid" aria-label="Crew task graph">{escape(diagram)}</pre>
-  </main>
-  <script type="module">
-    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-  </script>
-</body>
-</html>
-"""
-            case suffix:
-                raise ValueError(
-                    f"Visualization output must end in .mermaid or .html, not {suffix!r}"
-                )
-
-        await AsyncPath(output).write_text(content, encoding="utf-8")
+    def render(self, filename: str | Path) -> None:
+        write_visualization(self.to_mermaid_chart(), filename)
 
     def _find_manager_name(self) -> str | None:
         manager_names = [

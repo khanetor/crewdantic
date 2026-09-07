@@ -12,21 +12,13 @@ class ResearchReport(BaseModel):
 
 async def main() -> None:
     topic = "honeybee communication"
-    crews = {
-        "full": Crew(
-            agent_definition="agents.yaml",
-            task_definition="research_tasks.yaml",
-            output_type=ResearchReport,
-            agent_variables={"topic": topic},
-        ),
-        "brief": Crew(
-            agent_definition="agents.yaml",
-            task_definition="brief_tasks.yaml",
-            output_type=ResearchReport,
-            agent_variables={"topic": topic},
-        ),
-    }
-    report = await crews["brief"].kickoff({"topic": topic})
+    crew = Crew(
+        agent_definition="../basic/agents.yaml",
+        task_definition="brief_tasks.yaml",
+        output_type=ResearchReport,
+        agent_variables={"topic": topic},
+    )
+    report = await crew.kickoff({"topic": topic})
 
     assert isinstance(report, ResearchReport)
     assert report.key_points

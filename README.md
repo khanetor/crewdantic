@@ -129,12 +129,12 @@ Relative strings and `Path` values resolve beside the Python module that
 constructs the crew; absolute paths are used unchanged.
 
 `to_mermaid_chart()` returns the declared task order as Mermaid source.
-`render()` asynchronously writes that chart to a `.mermaid` or `.html` file:
+`render()` synchronously writes that chart to a `.mermaid` or `.html` file:
 
 ```python
 mermaid = crew.to_mermaid_chart()
-await crew.render("research_crew.mermaid")
-await crew.render("research_crew.html")
+crew.render("research_crew.mermaid")
+crew.render("research_crew.html")
 ```
 
 HTML output loads Mermaid from its CDN when opened in a browser.
@@ -211,10 +211,8 @@ crew = Crew(
 ```
 
 Any Pydantic AI `AgentToolset` can be a mapping value. Undefined capability
-and toolset references fail during crew construction. Pydantic AI manages
-their native run lifecycle, including cleanup when model or tool execution
-fails. URL-based configurations require an MCP server already running at that
-address.
+and toolset references fail during crew construction. URL-based configurations
+require an MCP server already running at that address.
 
 Agent roles, goals, and backstories interpolate `agent_variables` during crew
 construction. Task descriptions and expected outputs interpolate `kickoff()`
@@ -266,7 +264,7 @@ that graph to `.mermaid` or Mermaid-backed `.html` output:
 ```python
 workflow = ReportWorkflow()
 mermaid = workflow.to_mermaid_chart()
-await workflow.render("report_workflow.html")
+workflow.render("report_workflow.html")
 ```
 
 HTML output loads Mermaid from its CDN when opened and requires network access.
