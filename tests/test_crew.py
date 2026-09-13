@@ -921,6 +921,76 @@ class CrewTests(unittest.TestCase):
                     task_definition=tasks,
                 )
 
+    def test_rejects_unknown_definition_keys(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Research\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+                "  tool: typo\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research the topic\n"
+                "  expected_output: A report\n"
+                "  agent: researcher\n"
+            )
+
+            with self.assertRaises(ValidationError):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                )
+
+    def test_rejects_undefined_agent_variable_placeholder(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "researcher:\n"
+                "  role: '{missing_var} Researcher'\n"
+                "  goal: Research\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research the topic\n"
+                "  expected_output: A report\n"
+                "  agent: researcher\n"
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing_var"):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                )
+
+    def test_rejects_undefined_task_input_placeholder(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Research\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research {undefined_var}\n"
+                "  expected_output: A report\n"
+                "  agent: researcher\n"
+            )
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "Task 'research': Undefined placeholder"
+            ):
+                anyio.run(crew.kickoff)
+
 
 if __name__ == "__main__":
     unittest.main()

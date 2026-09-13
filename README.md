@@ -269,9 +269,27 @@ workflow.render("report_workflow.html")
 
 HTML output loads Mermaid from its CDN when opened and requires network access.
 
-Construction rejects undefined or mismatched dependencies, cycles, and steps
-that do not lead to `final_step`. Independent steps are resolved
-deterministically today.
+Construction rejects undefined or mismatched dependencies, cycles, steps that
+do not lead to `final_step`, and plain (non-`@step`) overrides of
+`to_mermaid_chart`/`render`. Independent steps are resolved deterministically
+today.
+
+Subclasses inherit steps and may add or override them by name; the merged
+graph is re-validated at class definition, most-derived definition wins:
+
+```python
+class TitledReportWorkflow(ReportWorkflow):
+    @step
+    def title(self, research: str) -> str:
+        return research.title()
+
+    @step
+    def final_step(self, research: str, title: str) -> Report:
+        return Report(body=f"{title}\n\n{research}")
+```
+
+Overriding `to_mermaid_chart` or `render` is rejected, whether or not the
+method is marked with `@step`.
 
 ## Examples
 

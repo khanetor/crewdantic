@@ -242,6 +242,65 @@ class WorkflowTests(unittest.TestCase):
                 async def after(self, final_step: Report) -> str:
                     return final_step.topic
 
+    def test_inherits_and_overrides_steps(self) -> None:
+        class BaseReportWorkflow(Workflow[ReportInput, Report]):
+            @step
+            async def research(self, workflow_input: ReportInput) -> Research:
+                return Research(f"Finding about {workflow_input.topic}")
+
+            @step
+            def final_step(
+                self,
+                workflow_input: ReportInput,
+                research: Research,
+            ) -> Report:
+                return Report(workflow_input.topic, research.finding, "")
+
+        class ExtendedReportWorkflow(BaseReportWorkflow):
+            @step
+            def market(self, workflow_input: ReportInput) -> Market:
+                return Market("developers")
+
+            @step
+            def final_step(  # ty: ignore[invalid-method-override]
+                self,
+                workflow_input: ReportInput,
+                research: Research,
+                market: Market,
+            ) -> Report:
+                return Report(workflow_input.topic, research.finding, market.audience)
+
+        report = anyio.run(
+            ExtendedReportWorkflow().kickoff,
+            ReportInput(topic="inherited steps"),
+        )
+
+        self.assertEqual(
+            report,
+            Report("inherited steps", "Finding about inherited steps", "developers"),
+        )
+
+    def test_rejects_non_step_visualization_overrides(self) -> None:
+        with self.assertRaises(TypeError):
+
+            class ChartOverride(Workflow[ReportInput, Report]):
+                def to_mermaid_chart(self) -> str:
+                    return "custom chart"
+
+                @step
+                def final_step(self, workflow_input: ReportInput) -> Report:
+                    return Report(workflow_input.topic, "", "")
+
+        with self.assertRaises(TypeError):
+
+            class RenderOverride(Workflow[ReportInput, Report]):
+                def render(self, filename: str | Path) -> None:
+                    _ = filename
+
+                @step
+                def final_step(self, workflow_input: ReportInput) -> Report:
+                    return Report(workflow_input.topic, "", "")
+
 
 if __name__ == "__main__":
     unittest.main()

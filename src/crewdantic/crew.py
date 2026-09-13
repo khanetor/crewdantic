@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Any, Generic, cast
 
 import yaml  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from pydantic_ai import (
     Agent,
     AgentCapability,
@@ -25,6 +25,8 @@ NonEmptyString = Annotated[str, Field(min_length=1)]
 
 
 class AgentDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     manager: Annotated[bool, Field(default=False)]
     role: NonEmptyString
     goal: NonEmptyString
@@ -52,6 +54,8 @@ class AgentDefinition(BaseModel):
 
 
 class TaskDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     description: NonEmptyString
     expected_output: NonEmptyString
     agent: Annotated[NonEmptyString | None, Field(default=None)]
@@ -77,6 +81,13 @@ def _definition_path(attribute: str, definition: str | Path, root: Path) -> Path
 def _load_yaml(path: Path, adapter: TypeAdapter[_Definition]) -> _Definition:
     with path.open(encoding="utf-8") as definition_file:
         return adapter.validate_python(yaml.safe_load(definition_file))
+
+
+def _safe_format(template: str, variables: Mapping[str, object]) -> str:
+    try:
+        return template.format_map(variables)
+    except KeyError as error:
+        raise ValueError(f"Undefined placeholder {error.args[0]!r}") from error
 
 
 class Crew(Generic[CrewOutputT, AgentDepsT]):
@@ -179,10 +190,11 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     if definition.output_model is not None
                     else str
                 ),
-                instructions=(
-                    f"Role: {definition.role.format_map(variables)}\n"
-                    f"Goal: {definition.goal.format_map(variables)}\n"
-                    f"Backstory: {definition.backstory.format_map(variables)}"
+                instructions=_safe_format(
+                    f"Role: {definition.role}\n"
+                    f"Goal: {definition.goal}\n"
+                    f"Backstory: {definition.backstory}",
+                    variables,
                 ),
                 tools=[registered_tools[tool] for tool in definition.tools],
                 toolsets=[
@@ -208,10 +220,12 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         task_outputs: dict[str, BaseModel | str] = {}
 
         for index, (task_name, task) in enumerate(self.task_definitions.items()):
-            prompt = (
-                f"{task.description.format_map(values)}\n\n"
-                f"Expected output:\n{task.expected_output.format_map(values)}"
-            )
+            try:
+                description = _safe_format(task.description, values)
+                expected_output = _safe_format(task.expected_output, values)
+            except ValueError as error:
+                raise ValueError(f"Task {task_name!r}: {error}") from error
+            prompt = f"{description}\n\nExpected output:\n{expected_output}"
             context_outputs = (
                 list(task_outputs.values())
                 if "context" not in task.model_fields_set

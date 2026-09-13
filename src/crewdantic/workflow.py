@@ -48,20 +48,17 @@ class Workflow(Generic[WorkflowInputT, WorkflowOutputT]):
             )
         except StopIteration:
             raise TypeError("Workflow must declare input and output types") from None
-        functions = {
-            name: value
-            for name, value in cls.__dict__.items()
-            if getattr(value, _STEP_MARKER, False)
-        }
+        functions: dict[str, Callable[..., object]] = {}
+        for ancestor in reversed(cls.__mro__):
+            for name, value in vars(ancestor).items():
+                if name in ("to_mermaid_chart", "render") and ancestor is not Workflow:
+                    raise TypeError(f"{name!r} is reserved for workflow visualization")
+                if getattr(value, _STEP_MARKER, False):
+                    functions[name] = value
         if _FINAL_STEP not in functions:
             raise TypeError("Workflow must declare a @step method named 'final_step'")
         if _WORKFLOW_INPUT in functions:
             raise TypeError(f"{_WORKFLOW_INPUT!r} is reserved for the workflow input")
-        for reserved_name in ("to_mermaid_chart", "render"):
-            if reserved_name in functions:
-                raise TypeError(
-                    f"{reserved_name!r} is reserved for workflow visualization"
-                )
 
         definitions: dict[str, _StepDefinition] = {}
         annotations: dict[str, dict[str, object]] = {}
