@@ -8,8 +8,6 @@ on:
       - "src/**"
       - "pyproject.toml"
       - "uv.lock"
-  workflow_dispatch:
-
 jobs:
   publish:
     runs-on: uv
