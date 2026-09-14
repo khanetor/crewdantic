@@ -5,7 +5,13 @@ A minimal crew abstraction for Pydantic AI, configured with CrewAI-style YAML.
 ## Installation
 
 ```console
-pip install crewdantic
+pip install --index-url https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
+```
+
+With [uv](https://docs.astral.sh/uv/):
+
+```console
+uv add --index https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
 ```
 
 ## Usage
