@@ -1,4 +1,5 @@
 import inspect
+import re
 from collections.abc import Mapping, Sequence
 from html import escape
 from pathlib import Path
@@ -14,6 +15,7 @@ from pydantic_ai import (
     Tool,
     UsageLimitExceeded,
     UsageLimits,
+    UserContent,
 )
 from pydantic_ai.tools import AgentDepsT, ToolFuncEither
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
@@ -83,11 +85,50 @@ def _load_yaml(path: Path, adapter: TypeAdapter[_Definition]) -> _Definition:
         return adapter.validate_python(yaml.safe_load(definition_file))
 
 
-def _safe_format(template: str, variables: Mapping[str, object]) -> str:
+def _safe_format(
+    template: str,
+    variables: Mapping[str, object],
+    file_labels: Mapping[str, UserContent] | None = None,
+) -> str:
+    labels = set(file_labels or ())
+    placeholders = re.findall(r"\{(\w+)\}", template)
+    unknown = [
+        name for name in placeholders if name not in variables and name not in labels
+    ]
+    if unknown:
+        raise ValueError(f"Undefined placeholder {unknown[0]!r}")
+    formatted = template
+    for name in labels:
+        formatted = formatted.replace(f"{{{name}}}", f"\0{name}\1")
     try:
-        return template.format_map(variables)
+        formatted = formatted.format_map(variables)
     except KeyError as error:
         raise ValueError(f"Undefined placeholder {error.args[0]!r}") from error
+    return formatted.replace("\0", "{").replace("\1", "}")
+
+
+def _inject_files(
+    prompt: str, files: Mapping[str, UserContent], task_name: str
+) -> str | list[str | UserContent]:
+    """Splice {label} file parts into the prompt; unreferenced labels error."""
+    if not files:
+        return prompt
+    parts: list[str | UserContent] = []
+    used: set[str] = set()
+    for segment in re.split(r"(\{\w+\})", prompt):
+        name = segment[1:-1] if segment.startswith("{") else ""
+        if name in files:
+            parts.append(files[name])
+            used.add(name)
+        else:
+            parts.append(segment)
+    unused = files.keys() - used
+    if unused:
+        raise ValueError(
+            f"Task {task_name!r} does not reference file input(s): "
+            + ", ".join(repr(name) for name in sorted(unused))
+        )
+    return parts if any(not isinstance(part, str) for part in parts) else prompt
 
 
 class Crew(Generic[CrewOutputT, AgentDepsT]):
@@ -210,19 +251,22 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
 
     async def kickoff(
         self,
-        inputs: Mapping[str, object] | None = None,
         context: AgentDepsT | None = None,
         usage_limits: UsageLimits | None = None,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        file_inputs: Mapping[str, UserContent] | None = None,
     ) -> CrewOutputT:
         values = inputs or {}
+        files = file_inputs or {}
         usage = RunUsage()
         limits = usage_limits or UsageLimits()
         task_outputs: dict[str, BaseModel | str] = {}
 
         for index, (task_name, task) in enumerate(self.task_definitions.items()):
             try:
-                description = _safe_format(task.description, values)
-                expected_output = _safe_format(task.expected_output, values)
+                description = _safe_format(task.description, values, files)
+                expected_output = _safe_format(task.expected_output, values, files)
             except ValueError as error:
                 raise ValueError(f"Task {task_name!r}: {error}") from error
             prompt = f"{description}\n\nExpected output:\n{expected_output}"
@@ -235,11 +279,14 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 prompt += "\n\nPrevious task outputs:\n" + "\n\n".join(
                     str(output) for output in context_outputs
                 )
+            prompt_parts: str | list[str | UserContent] = _inject_files(
+                prompt, files, task_name
+            )
 
             if self.manager_name is None:
                 assert task.agent is not None
                 result = await self.agents[task.agent].run(
-                    prompt,
+                    prompt_parts,
                     deps=cast(AgentDepsT, context),
                     usage=usage,
                     usage_limits=limits,
@@ -252,7 +299,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     and (task.agent is None or name == task.agent)
                 }
                 result = await self.agents[self.manager_name].run(
-                    prompt,
+                    prompt_parts,
                     output_type=(
                         self._output_type
                         if index == len(self.task_definitions) - 1
@@ -261,7 +308,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     deps=cast(AgentDepsT, context),
                     usage=usage,
                     usage_limits=limits,
-                    toolsets=[self._delegation_toolset(coworkers)],
+                    toolsets=[self._delegation_toolset(coworkers, files)],
                 )
             task_outputs[task_name] = result.output
 
@@ -363,6 +410,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
     @staticmethod
     def _delegation_toolset(
         coworkers: Mapping[str, Agent[_DelegationDepsT, BaseModel | str]],
+        file_parts: Mapping[str, UserContent],
     ) -> FunctionToolset[_DelegationDepsT]:
         available = ", ".join(repr(name) for name in coworkers)
 
@@ -377,9 +425,16 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 return (
                     f"Unknown coworker {coworker!r}. Available coworkers: {available}"
                 )
+            prompt = f"{request}\n\nContext:\n{context}"
+            for name in file_parts:
+                prompt += f"\n\n{{{name}}}"
+            if file_parts:
+                prompt = _inject_files(
+                    prompt, file_parts, f"delegation to {coworker!r}"
+                )
             try:
                 result = await agent.run(
-                    f"{request}\n\nContext:\n{context}",
+                    prompt,
                     deps=ctx.deps,
                     usage=ctx.usage,
                     usage_limits=ctx.usage_limits,
@@ -396,7 +451,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
             context: str,
             coworker: str,
         ) -> BaseModel | str:
-            """Delegate a task to a coworker with all context needed to complete it."""
+            """Delegate a task to a coworker."""
             return await run_coworker(ctx, coworker, task, context)
 
         async def ask_question(
@@ -405,7 +460,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
             context: str,
             coworker: str,
         ) -> BaseModel | str:
-            """Ask a coworker a question with all context needed to answer it."""
+            """Ask a coworker a question."""
             return await run_coworker(ctx, coworker, question, context)
 
         return FunctionToolset(

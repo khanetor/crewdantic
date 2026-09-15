@@ -18,7 +18,7 @@ async def main() -> None:
         output_type=ResearchReport,
         agent_variables={"topic": topic},
     )
-    report = await crew.kickoff({"topic": topic})
+    report = await crew.kickoff(inputs={"topic": topic})
 
     assert isinstance(report, ResearchReport)
     assert report.key_points

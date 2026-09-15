@@ -26,6 +26,7 @@ from pydantic_ai import RunContext, Tool
 
 from crewdantic import Crew
 
+
 class ResearchOutput(BaseModel):
     summary: str
 
@@ -34,15 +35,14 @@ class ResearchOutput(BaseModel):
 class ResearchContext:
     documents: list[str]
 
+
 def search(ctx: RunContext[ResearchContext], query: str) -> list[str]:
     return [
         document
         for document in ctx.deps.documents
         if query.casefold() in document.casefold()
     ]
-
 ```
-
 
 ```yaml
 # agents.yaml
@@ -74,9 +74,11 @@ compose:
 ```
 
 `Crew(...)` turns each agent declaration into a Pydantic AI `Agent`.
-Every agent must declare a Pydantic AI model name as `llm`; invalid names fail
-during crew construction. Agents return text unless they declare
-`output_model`, matching a registered Pydantic model class name.
+Every agent must declare a Pydantic AI model name as `llm`; model names are
+parsed at crew construction, so unknown providers fail there (model-name
+validity beyond the provider is checked when a call is made). Agents return
+text unless they declare `output_model`, matching a registered Pydantic model
+class name.
 
 `kickoff()` runs tasks in YAML order and returns the final task's agent output.
 Each task receives all previous task outputs by default in both sequential and
@@ -99,9 +101,36 @@ crew = Crew(
     tools=[Tool(search)],
 )
 report = await crew.kickoff(
-    {"topic": "AI agents"},
+    inputs={"topic": "AI agents"},
     context=ResearchContext(documents=["AI agents use tools."]),
 )
+```
+
+Multimodal files ride alongside `inputs` as labeled `file_inputs`. A `{label}`
+placeholder in a task description or expected output injects the file part at
+that exact position; referencing every label is required. Import Pydantic AI
+content parts from `pydantic_ai` directly:
+
+```python
+from pathlib import Path
+from pydantic_ai import BinaryContent, ImageUrl
+
+report = await crew.kickoff(
+    inputs={"topic": "AI agents"},
+    file_inputs={
+        "chart": BinaryContent(
+            data=Path("chart.png").read_bytes(), media_type="image/png"
+        ),
+        "diagram": ImageUrl(url="https://example.com/diagram.png"),
+    },
+)
+```
+
+```yaml
+review:
+  description: "Review {chart} against the reference {diagram}."
+  expected_output: Findings list
+  agent: reviewer
 ```
 
 A single agent with `manager: true` makes the crew hierarchical:
@@ -299,7 +328,7 @@ method is marked with `@step`.
 
 ## Examples
 
-The repository includes deterministic examples that require no API keys:
+Three examples require no API keys:
 
 ```console
 uv run python examples/workflow/main.py
@@ -309,5 +338,10 @@ uv run python examples/capability/main.py
 
 The workflow example runs a typed DAG using only Python dataclasses. The tools
 example registers both a Pydantic AI `Tool` and a Python function. The
-capability example registers a custom reusable capability. All three are
-deterministic and require no network access.
+capability example registers a custom reusable capability. The `basic` and
+`shared_agents` examples call Gemini and need `GOOGLE_API_KEY` set.
+
+## Development
+
+Type checking uses [ty](https://docs.astral.sh/ty/) with every rule enabled;
+run `uv run ty check --error all src tests examples` locally so CI matches.

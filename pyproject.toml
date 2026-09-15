@@ -1,6 +1,6 @@
 [project]
 name = "crewdantic"
-version = "0.1.0"
+version = "0.2.0"
 description = "A small Python library."
 readme = "README.md"
 authors = [{ name = "khanetor", email = "nlhkha@gmail.com" }]

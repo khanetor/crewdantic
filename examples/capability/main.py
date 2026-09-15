@@ -1,10 +1,12 @@
 import anyio
 from pydantic_ai.capabilities import AbstractCapability
+from typing_extensions import override
 
 from crewdantic import Crew
 
 
 class ConciseCapability(AbstractCapability[object]):
+    @override
     def get_instructions(self) -> str:
         return "Answer in one short sentence."
 

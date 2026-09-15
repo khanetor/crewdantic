@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import assert_type
 
 import anyio
+from typing_extensions import override
 
 from crewdantic import Workflow, step
 
@@ -130,6 +131,7 @@ class WorkflowTests(unittest.TestCase):
 
             class ChartStep(Workflow[ReportInput, Report]):
                 @step
+                @override
                 def to_mermaid_chart(self) -> str:
                     return "chart"
 
@@ -145,6 +147,7 @@ class WorkflowTests(unittest.TestCase):
                     return "workflow.html"
 
                 @step
+                @override
                 def render(self, filename: str | Path) -> None:
                     _ = filename
 
@@ -262,6 +265,7 @@ class WorkflowTests(unittest.TestCase):
                 return Market("developers")
 
             @step
+            @override
             def final_step(  # ty: ignore[invalid-method-override]
                 self,
                 workflow_input: ReportInput,
@@ -284,6 +288,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(TypeError):
 
             class ChartOverride(Workflow[ReportInput, Report]):
+                @override
                 def to_mermaid_chart(self) -> str:
                     return "custom chart"
 
@@ -294,6 +299,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(TypeError):
 
             class RenderOverride(Workflow[ReportInput, Report]):
+                @override
                 def render(self, filename: str | Path) -> None:
                     _ = filename
 

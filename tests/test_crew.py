@@ -3,6 +3,7 @@ import unittest
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import assert_type
 
@@ -10,6 +11,8 @@ import anyio
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import (
+    BinaryContent,
+    ImageUrl,
     ModelRequest,
     ModelResponse,
     RunContext,
@@ -25,6 +28,7 @@ from pydantic_ai import (
 from pydantic_ai.capabilities import MCP, AbstractCapability
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.function import FunctionModel
+from typing_extensions import override
 
 from crewdantic import Crew
 
@@ -147,7 +151,9 @@ class CrewTests(unittest.TestCase):
                 model = FunctionModel(respond)
                 for agent in crew.agents.values():
                     overrides.enter_context(agent.override(model=model))
-                output = anyio.run(crew.kickoff, {"topic": [{"name": "wasps"}]})
+                output = anyio.run(
+                    partial(crew.kickoff, inputs={"topic": [{"name": "wasps"}]})
+                )
 
             self.assertEqual(set(crew.agents), {"researcher", "writer"})
             self.assertEqual(crew.agents["researcher"].name, "researcher")
@@ -430,11 +436,97 @@ class CrewTests(unittest.TestCase):
                 self.assertRaises(UsageLimitExceeded),
             ):
                 anyio.run(
-                    crew.kickoff,
-                    None,
-                    None,
-                    UsageLimits(request_limit=1),
+                    partial(crew.kickoff, usage_limits=UsageLimits(request_limit=1))
                 )
+
+    def test_manager_delegation_forwards_file_inputs_to_workers(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "manager:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Find facts\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research bees using {chart}\n"
+                "  expected_output: Verified facts\n"
+            )
+            image = BinaryContent(data=b"png-bytes", media_type="image/png")
+            worker_prompts: list[object] = []
+
+            def manage(messages, info):
+                request = next(
+                    message
+                    for message in reversed(messages)
+                    if isinstance(message, ModelRequest)
+                )
+                if not any(isinstance(part, ToolReturnPart) for part in request.parts):
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart(
+                                tool_name="delegate_work",
+                                args={
+                                    "task": "Find one bee fact",
+                                    "context": "The report is about bees",
+                                    "coworker": "researcher",
+                                },
+                                tool_call_id="research",
+                            )
+                        ]
+                    )
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name=info.output_tools[0].name,
+                            args={"finding": "Bees communicate by dancing."},
+                        )
+                    ]
+                )
+
+            def work(messages, info):
+                request = next(
+                    message for message in messages if isinstance(message, ModelRequest)
+                )
+                prompt = next(
+                    part.content
+                    for part in request.parts
+                    if isinstance(part, UserPromptPart)
+                )
+                worker_prompts.append(prompt)
+                return ModelResponse(parts=[TextPart(content="Worker findings")])
+
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+                output_type=ResearchOutput,
+            )
+            with (
+                crew.agents["manager"].override(model=FunctionModel(manage)),
+                crew.agents["researcher"].override(model=FunctionModel(work)),
+            ):
+                output = anyio.run(
+                    partial(
+                        crew.kickoff,
+                        file_inputs={"chart": image},
+                    )
+                )
+
+            self.assertEqual(
+                output,
+                ResearchOutput(finding="Bees communicate by dancing."),
+            )
+            self.assertEqual(len(worker_prompts), 1)
+            parts = worker_prompts[0]
+            assert isinstance(parts, list)
+            assert isinstance(parts[0], str)
+            self.assertIn("Find one bee fact", parts[0])
+            self.assertEqual(parts[1], image)
 
     def test_rejects_multiple_manager_agents(self) -> None:
         with definition_paths() as (agents, tasks):
@@ -567,10 +659,12 @@ class CrewTests(unittest.TestCase):
                 return value + ctx.deps.offset
 
             class ExtraInstructions(AbstractCapability[ToolContext]):
+                @override
                 def get_instructions(self) -> str:
                     return "Capability enabled."
 
             class UnusedInstructions(AbstractCapability[ToolContext]):
+                @override
                 def get_instructions(self) -> str:
                     return "Unused capability."
 
@@ -629,7 +723,9 @@ class CrewTests(unittest.TestCase):
 
             self.assertIs(crew.agents["researcher"].deps_type, ToolContext)
             with crew.agents["researcher"].override(model=FunctionModel(respond)):
-                output = anyio.run(crew.kickoff, None, ToolContext(offset=10))
+                output = anyio.run(
+                    partial(crew.kickoff, context=ToolContext(offset=10))
+                )
 
             self.assertEqual(output, "Tools worked")
             agents.write_text(agents.read_text().replace("increment", "missing"))
@@ -990,6 +1086,90 @@ class CrewTests(unittest.TestCase):
                 ValueError, "Task 'research': Undefined placeholder"
             ):
                 anyio.run(crew.kickoff)
+
+    def test_kickoff_injects_file_inputs_at_labeled_placeholders(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Research\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Review {chart} against {report}\n"
+                "  expected_output: A report\n"
+                "  agent: researcher\n"
+            )
+            contents: list[object] = []
+
+            def respond(messages, info):
+                request = next(
+                    message
+                    for message in reversed(messages)
+                    if isinstance(message, ModelRequest)
+                )
+                part = next(
+                    part for part in request.parts if isinstance(part, UserPromptPart)
+                )
+                contents.append(part.content)
+                return ModelResponse(parts=[TextPart(content="done")])
+
+            image = BinaryContent(data=b"png-bytes", media_type="image/png")
+            url = ImageUrl(url="https://example.com/chart.png")
+            crew = Crew(agent_definition=agents, task_definition=tasks)
+            with crew.agents["researcher"].override(model=FunctionModel(respond)):
+                output = anyio.run(
+                    partial(
+                        crew.kickoff,
+                        inputs={"topic": "sales"},
+                        file_inputs={"chart": image, "report": url},
+                    )
+                )
+
+            self.assertEqual(output, "done")
+            parts = contents[0]
+            assert isinstance(parts, list)
+            self.assertEqual(
+                parts,
+                [
+                    "Review ",
+                    image,
+                    " against ",
+                    url,
+                    "\n\nExpected output:\nA report",
+                ],
+            )
+
+    def test_kickoff_rejects_unreferenced_file_inputs(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "researcher:\n"
+                "  role: Researcher\n"
+                "  goal: Research\n"
+                "  backstory: Curious\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Analyze nothing\n"
+                "  expected_output: A report\n"
+                "  agent: researcher\n"
+            )
+            crew = Crew(agent_definition=agents, task_definition=tasks)
+            with self.assertRaisesRegex(
+                ValueError,
+                "Task 'research' does not reference file input\\(s\\): 'chart'",
+            ):
+                anyio.run(
+                    partial(
+                        crew.kickoff,
+                        file_inputs={
+                            "chart": BinaryContent(data=b"x", media_type="image/png")
+                        },
+                    )
+                )
 
 
 if __name__ == "__main__":
