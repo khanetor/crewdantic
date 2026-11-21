@@ -80,9 +80,24 @@ def _definition_path(attribute: str, definition: str | Path, root: Path) -> Path
     return path
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """Reject duplicate mapping keys instead of silently keeping the last one."""
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> Any:
+        seen: set[Any] = set()
+        for key_node, _ in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            if key in seen:
+                raise ValueError(f"Duplicate YAML key {key!r}")
+            seen.add(key)
+        return super().construct_mapping(node, deep=deep)
+
+
 def _load_yaml(path: Path, adapter: TypeAdapter[_Definition]) -> _Definition:
     with path.open(encoding="utf-8") as definition_file:
-        return adapter.validate_python(yaml.safe_load(definition_file))
+        return adapter.validate_python(
+            yaml.load(definition_file, Loader=_UniqueKeyLoader)
+        )
 
 
 def _safe_format(
@@ -259,8 +274,12 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
     ) -> CrewOutputT:
         values = inputs or {}
         files = file_inputs or {}
+        for name in files:
+            if not re.fullmatch(r"\w+", name):
+                raise ValueError(f"File input label {name!r} must match \\w+")
         usage = RunUsage()
-        limits = usage_limits or UsageLimits()
+        # Pydantic AI applies its own request_limit=50 when given None.
+        limits = usage_limits or UsageLimits(request_limit=None)
         task_outputs: dict[str, BaseModel | str] = {}
 
         for index, (task_name, task) in enumerate(self.task_definitions.items()):

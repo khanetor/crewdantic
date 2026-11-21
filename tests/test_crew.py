@@ -269,6 +269,38 @@ class CrewTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Crew(agent_definition=agents, task_definition=tasks)
 
+    def test_applies_no_default_model_call_limit(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Complete tasks\n"
+                "  backstory: Reliable\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "".join(
+                    f"task_{index}:\n"
+                    "  description: Step\n"
+                    "  expected_output: Result\n"
+                    "  agent: worker\n"
+                    for index in range(60)
+                )
+            )
+            calls = 0
+
+            def respond(messages, info):
+                nonlocal calls
+                calls += 1
+                return ModelResponse(parts=[TextPart(content=f"output {calls}")])
+
+            crew = Crew(agent_definition=agents, task_definition=tasks)
+            with crew.agents["worker"].override(model=FunctionModel(respond)):
+                output = anyio.run(crew.kickoff)
+
+            self.assertEqual(output, "output 60")
+            self.assertEqual(calls, 60)
+
     def test_runs_hierarchical_tasks_through_manager(self) -> None:
         with definition_paths() as (agents, tasks):
             agents.write_text(
@@ -528,6 +560,64 @@ class CrewTests(unittest.TestCase):
             self.assertIn("Find one bee fact", parts[0])
             self.assertEqual(parts[1], image)
 
+    def test_reports_coworker_failure_to_manager(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "manager:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Complete tasks\n"
+                "  backstory: Reliable\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "research:\n"
+                "  description: Research bees\n"
+                "  expected_output: Bee facts\n"
+            )
+
+            def manage(messages, info):
+                tool_returns = [
+                    part
+                    for message in messages
+                    if isinstance(message, ModelRequest)
+                    for part in message.parts
+                    if isinstance(part, ToolReturnPart)
+                ]
+                if not tool_returns:
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart(
+                                tool_name="delegate_work",
+                                args={
+                                    "task": "Find one bee fact",
+                                    "context": "The report is about bees",
+                                    "coworker": "worker",
+                                },
+                                tool_call_id="failure",
+                            )
+                        ]
+                    )
+                self.assertEqual(
+                    tool_returns[0].content,
+                    "Coworker 'worker' failed: boom",
+                )
+                return ModelResponse(parts=[TextPart(content="Managed without worker")])
+
+            def fail(messages, info):
+                raise RuntimeError("boom")
+
+            crew = Crew(agent_definition=agents, task_definition=tasks)
+            with (
+                crew.agents["manager"].override(model=FunctionModel(manage)),
+                crew.agents["worker"].override(model=FunctionModel(fail)),
+            ):
+                output = anyio.run(crew.kickoff)
+
+            self.assertEqual(output, "Managed without worker")
+
     def test_rejects_multiple_manager_agents(self) -> None:
         with definition_paths() as (agents, tasks):
             agents.write_text(
@@ -596,6 +686,28 @@ class CrewTests(unittest.TestCase):
                     task_definition=tasks,
                     pydantic_models=[ResearchOutput],
                 )
+
+    def test_rejects_duplicate_yaml_keys(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "worker:\n"
+                "  role: Worker\n"
+                "  goal: Complete tasks\n"
+                "  backstory: Reliable\n"
+                "  llm: test\n"
+            )
+            tasks.write_text(
+                "first:\n"
+                "  description: First\n"
+                "  expected_output: First output\n"
+                "  agent: worker\n"
+                "first:\n"
+                "  description: Duplicate\n"
+                "  expected_output: Duplicate output\n"
+                "  agent: worker\n"
+            )
+            with self.assertRaisesRegex(ValueError, "Duplicate YAML key 'first'"):
+                Crew(agent_definition=agents, task_definition=tasks)
 
     def test_rejects_manager_delegation_tool_name_collisions(self) -> None:
         def delegate_work(_ctx: RunContext[object]) -> str:
@@ -1167,6 +1279,18 @@ class CrewTests(unittest.TestCase):
                         crew.kickoff,
                         file_inputs={
                             "chart": BinaryContent(data=b"x", media_type="image/png")
+                        },
+                    )
+                )
+
+            with self.assertRaisesRegex(
+                ValueError, "File input label 'my-chart' must match"
+            ):
+                anyio.run(
+                    partial(
+                        crew.kickoff,
+                        file_inputs={
+                            "my-chart": BinaryContent(data=b"x", media_type="image/png")
                         },
                     )
                 )

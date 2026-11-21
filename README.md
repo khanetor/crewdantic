@@ -163,7 +163,8 @@ manager is allowed. The manager runs tasks in YAML order and receives
 tools to that worker; an unassigned task allows every non-manager agent. The
 manager's `output_model` determines the final crew output type, while
 intermediate manager outputs are text. `usage_limits` passed to `kickoff()`
-apply across manager and worker model calls.
+apply across manager and worker model calls; with no limits, the crew enforces
+no request limit instead of Pydantic AI's 50-request default.
 
 Relative strings and `Path` values resolve beside the Python module that
 constructs the crew; absolute paths are used unchanged.

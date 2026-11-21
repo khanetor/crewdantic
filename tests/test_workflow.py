@@ -284,6 +284,28 @@ class WorkflowTests(unittest.TestCase):
             Report("inherited steps", "Finding about inherited steps", "developers"),
         )
 
+    def test_rejects_plain_step_overrides(self) -> None:
+        class BaseWorkflow(Workflow[ReportInput, Report]):
+            @step
+            def research(self, workflow_input: ReportInput) -> Research:
+                return Research(f"Finding about {workflow_input.topic}")
+
+            @step
+            def final_step(
+                self,
+                workflow_input: ReportInput,
+                research: Research,
+            ) -> Report:
+                return Report(workflow_input.topic, research.finding, "")
+
+        with self.assertRaisesRegex(
+            TypeError, "'research' must be decorated with @step"
+        ):
+
+            class PlainOverride(BaseWorkflow):
+                def research(self, workflow_input: ReportInput) -> Research:
+                    return Research("plain override")
+
     def test_rejects_non_step_visualization_overrides(self) -> None:
         with self.assertRaises(TypeError):
 

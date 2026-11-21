@@ -55,6 +55,10 @@ class Workflow(Generic[WorkflowInputT, WorkflowOutputT]):
                     raise TypeError(f"{name!r} is reserved for workflow visualization")
                 if getattr(value, _STEP_MARKER, False):
                     functions[name] = value
+                elif name in functions:
+                    raise TypeError(
+                        f"{name!r} must be decorated with @step to override a step"
+                    )
         if _FINAL_STEP not in functions:
             raise TypeError("Workflow must declare a @step method named 'final_step'")
         if _WORKFLOW_INPUT in functions:
