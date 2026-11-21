@@ -1,0 +1,6 @@
+triage:
+  description: "{message}"
+  expected_output: A routing decision
+  agent: triage
+  llm: system-one:d3:4b
+  output_model: TriageDecision

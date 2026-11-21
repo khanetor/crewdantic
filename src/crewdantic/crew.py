@@ -17,6 +17,7 @@ from pydantic_ai import (
     UsageLimits,
     UserContent,
 )
+from pydantic_ai.models import Model, infer_model
 from pydantic_ai.tools import AgentDepsT, ToolFuncEither
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 from typing_extensions import TypeVar
@@ -62,6 +63,8 @@ class TaskDefinition(BaseModel):
     expected_output: NonEmptyString
     agent: Annotated[NonEmptyString | None, Field(default=None)]
     context: Annotated[list[NonEmptyString] | None, Field(default=None)]
+    llm: Annotated[NonEmptyString | None, Field(default=None)]
+    output_model: Annotated[NonEmptyString | None, Field(default=None)]
 
 
 _Definition = TypeVar("_Definition")
@@ -218,8 +221,20 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     f"Agent {agent_name!r} references undefined Pydantic model "
                     f"{definition.output_model!r}"
                 )
+        for task_name, task in self.task_definitions.items():
+            if task.output_model is not None and task.output_model not in output_models:
+                raise ValueError(
+                    f"Task {task_name!r} references undefined Pydantic model "
+                    f"{task.output_model!r}"
+                )
         self._validate_output_type(output_type, output_models)
         self._output_type = output_type
+        self._output_models = output_models
+        self._task_models: dict[str, Model] = {
+            task_name: infer_model(task.llm)
+            for task_name, task in self.task_definitions.items()
+            if task.llm is not None
+        }
 
         self.agents: dict[str, Agent[AgentDepsT, BaseModel | str]] = {
             name: Agent(
@@ -285,12 +300,29 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
 
             if self.manager_name is None:
                 assert task.agent is not None
-                result = await self.agents[task.agent].run(
-                    prompt_parts,
-                    deps=cast(AgentDepsT, context),
-                    usage=usage,
-                    usage_limits=limits,
+                agent = self.agents[task.agent]
+                output_type = (
+                    self._output_models[task.output_model]
+                    if task.output_model is not None
+                    else agent.output_type
                 )
+                if task.llm is None:
+                    result = await agent.run(
+                        prompt_parts,
+                        output_type=output_type,
+                        deps=cast(AgentDepsT, context),
+                        usage=usage,
+                        usage_limits=limits,
+                    )
+                else:
+                    with agent.override(model=self._task_models[task_name]):
+                        result = await agent.run(
+                            prompt_parts,
+                            output_type=output_type,
+                            deps=cast(AgentDepsT, context),
+                            usage=usage,
+                            usage_limits=limits,
+                        )
             else:
                 coworkers = {
                     name: agent
@@ -374,6 +406,13 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 raise ValueError(
                     f"Task {task_name!r} cannot assign manager {task.agent!r} as a worker"
                 )
+            if self.manager_name is not None and (
+                task.llm is not None or task.output_model is not None
+            ):
+                raise ValueError(
+                    f"Task {task_name!r} cannot override llm or output_model "
+                    "in a hierarchical crew"
+                )
             previous_tasks.add(task_name)
 
     def _validate_output_type(
@@ -391,10 +430,12 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         )
         assert final_agent_name is not None
         final_definition = self.agent_definitions[final_agent_name]
+        final_output_model = (
+            self.task_definitions[final_task_name].output_model
+            or final_definition.output_model
+        )
         final_output_type = (
-            output_models[final_definition.output_model]
-            if final_definition.output_model is not None
-            else str
+            output_models[final_output_model] if final_output_model is not None else str
         )
         if final_output_type is output_type:
             return

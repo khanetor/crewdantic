@@ -260,50 +260,64 @@ inputs independently.
 Template values may be any Python object supported by string formatting,
 including lists, mappings, and Pydantic models.
 
-## System One decisions
+## Decision steps
 
-`SystemOne` is a reusable capability that gives agents `noul`, `choice`, and
-`score` tools backed by a Jev-compatible `/v1/systemone` endpoint. Each tool
-returns a typed `NoulDecision`, `ChoiceDecision`, or `ScoreDecision`; the
-agent's own `output_model` is unchanged. Register it through the constructor
-and opt in from YAML:
+A task can run on a Pydantic AI decision model such as System One by overriding
+its agent's `llm` and `output_model`. Each `output_model` field becomes one
+question: `bool` is a yes/no (`noul`), a `Literal` of strings is a choice, and a
+union of whole-number `Literal`s with a description per level is a score.
 
 ```python
-from crewdantic import Crew, SystemOne
+from typing import Annotated, Literal
 
-crew = Crew(
-    agent_definition="agents.yaml",
-    task_definition="tasks.yaml",
-    capabilities=[SystemOne(id="systemone")],
+from pydantic import BaseModel, Field
+
+
+Severity = (
+    Annotated[Literal[0], Field(description="Cosmetic or trivial")]
+    | Annotated[Literal[1], Field(description="Blocks one user, workaround exists")]
+    | Annotated[Literal[2], Field(description="Blocks many users")]
 )
+
+
+class TriageDecision(BaseModel):
+    """Route a support message."""
+
+    urgent: bool = Field(description="Does someone need to act now?")
+    team: Literal["billing", "engineering", "sales"] = Field(
+        description="Which team owns this?"
+    )
+    severity: Severity = Field(description="How bad is it?")
 ```
 
 ```yaml
-researcher:
-  role: Researcher
-  goal: Classify findings
-  backstory: Decisive
-  llm: openai:gpt-5.2
-  capabilities:
-    - systemone
+# tasks.yaml
+triage:
+  description: "{message}"
+  expected_output: A routing decision
+  agent: triage
+  llm: system-one:d3:4b
+  output_model: TriageDecision
 ```
-
-Pass `base_url`, `model`, and `api_key` explicitly, or set
-`SYSTEMONE_BASE_URL`, `SYSTEMONE_MODEL`, and `SYSTEMONE_API_KEY`. `base_url` is
-the host; requests go to `<base_url>/v1/systemone`. An injected
-`httpx.AsyncClient` replaces the per-call client, so tests need no network:
 
 ```python
-import httpx
-from crewdantic import SystemOne
-
-systemone = SystemOne(
-    base_url="https://inference.do-ai.run",
-    model="typesafe-jev-1.13.0",
-    api_key="...",
-    client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+crew = Crew(
+    agent_definition="agents.yaml",
+    task_definition="tasks.yaml",
+    output_type=TriageDecision,
 )
+decision = await crew.kickoff(inputs={"message": "Delivery was late."})
 ```
+
+`llm` and `output_model` are optional per-task overrides of the assigned
+agent's values, so one task YAML file can mix chat and decision steps. Agents
+still declare a default `llm`, and hierarchical crews reject task overrides
+because the manager runs every step.
+
+System One reads `SYSTEM_ONE_BASE_URL` and, when required,
+`SYSTEM_ONE_API_KEY`. A local Ollama server exposes the endpoint, so
+`SYSTEM_ONE_BASE_URL=http://localhost:11434` with `llm: system-one:d3:4b` runs
+without a key.
 
 ## Workflows
 
@@ -390,6 +404,14 @@ The workflow example runs a typed DAG using only Python dataclasses. The tools
 example registers both a Pydantic AI `Tool` and a Python function. The
 capability example registers a custom reusable capability. The `basic` and
 `shared_agents` examples call Gemini and need `GOOGLE_API_KEY` set.
+
+The System One example needs a local Ollama server and no API key:
+
+```console
+SYSTEM_ONE_BASE_URL=http://localhost:11434 uv run python examples/systemone/main.py
+```
+
+It routes one support message with `noul`, `choice`, and `score` fields.
 
 ## Development
 

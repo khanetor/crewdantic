@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import assert_type
+from unittest.mock import patch
 
 import anyio
 from mcp.server.mcpserver import MCPServer
@@ -1169,6 +1170,92 @@ class CrewTests(unittest.TestCase):
                             "chart": BinaryContent(data=b"x", media_type="image/png")
                         },
                     )
+                )
+
+    def test_task_overrides_model_and_output_model(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "writer:\n"
+                "  role: Writer\n"
+                "  goal: Write clearly\n"
+                "  backstory: Clear\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+            )
+            tasks.write_text(
+                "compose:\n"
+                "  description: Compose the report\n"
+                "  expected_output: One structured finding\n"
+                "  agent: writer\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+            )
+
+            def respond(_messages, info):
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            tool_name=info.output_tools[0].name,
+                            args={"finding": "Task model decided."},
+                        )
+                    ]
+                )
+
+            task_model = FunctionModel(respond)
+            with patch("crewdantic.crew.infer_model", return_value=task_model) as infer:
+                crew = Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    output_type=ResearchOutput,
+                )
+
+            infer.assert_called_once_with("test")
+            output = anyio.run(crew.kickoff)
+            self.assertEqual(output, ResearchOutput(finding="Task model decided."))
+
+    def test_rejects_task_output_and_model_overrides_that_cannot_apply(self) -> None:
+        with definition_paths() as (agents, tasks):
+            agents.write_text(
+                "writer:\n"
+                "  role: Writer\n"
+                "  goal: Write clearly\n"
+                "  backstory: Clear\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+            )
+            tasks.write_text(
+                "compose:\n"
+                "  description: Compose\n"
+                "  expected_output: One finding\n"
+                "  agent: writer\n"
+                "  output_model: MissingOutput\n"
+            )
+            with self.assertRaises(ValueError):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    output_type=ResearchOutput,
+                )
+
+            tasks.write_text(
+                tasks.read_text().replace("MissingOutput", "ResearchOutput")
+            )
+            agents.write_text(
+                "manager:\n"
+                "  manager: true\n"
+                "  llm: test\n"
+                "  output_model: ResearchOutput\n"
+                "writer:\n"
+                "  role: Writer\n"
+                "  goal: Write\n"
+                "  backstory: Clear\n"
+                "  llm: test\n"
+            )
+            with self.assertRaisesRegex(ValueError, "cannot override llm"):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    output_type=ResearchOutput,
                 )
 
 
