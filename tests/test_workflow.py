@@ -266,7 +266,7 @@ class WorkflowTests(unittest.TestCase):
 
             @step
             @override
-            def final_step(  # ty: ignore[invalid-method-override]
+            def final_step(  # ty: ignore[incompatible-method-override]
                 self,
                 workflow_input: ReportInput,
                 research: Research,

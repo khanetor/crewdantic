@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -34,7 +34,7 @@ from crewdantic import Crew
 
 
 @contextmanager
-def definition_paths() -> Iterator[tuple[Path, Path]]:
+def definition_paths() -> Generator[tuple[Path, Path]]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         yield root / "agents.yaml", root / "tasks.yaml"
