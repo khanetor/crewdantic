@@ -8,13 +8,13 @@ Packages are published as assets on [GitHub Releases](https://github.com/khaneto
 Install a wheel from a release (change `0.3.0` to the version you want):
 
 ```console
-pip install "crewdantic @ https://github.com/khanetor/crewdantic/releases/latest/download/crewdantic-0.3.0-py3-none-any.whl"
+pip install "crewdantic @ https://github.com/khanetor/crewdantic/releases/download/v0.3.0/crewdantic-0.3.0-py3-none-any.whl"
 ```
 
 With [uv](https://docs.astral.sh/uv/):
 
 ```console
-uv add "crewdantic @ https://github.com/khanetor/crewdantic/releases/latest/download/crewdantic-0.3.0-py3-none-any.whl"
+uv add "crewdantic @ https://github.com/khanetor/crewdantic/releases/download/v0.3.0/crewdantic-0.3.0-py3-none-any.whl"
 ```
 
 ## Usage
