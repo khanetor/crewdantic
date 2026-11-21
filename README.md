@@ -4,14 +4,17 @@ A minimal crew abstraction for Pydantic AI, configured with CrewAI-style YAML.
 
 ## Installation
 
+Packages are published as assets on [GitHub Releases](https://github.com/khanetor/crewdantic/releases).
+Install a wheel from a release (change `0.2.0` to the version you want):
+
 ```console
-pip install --index-url https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
+pip install "crewdantic @ https://github.com/khanetor/crewdantic/releases/latest/download/crewdantic-0.2.0-py3-none-any.whl"
 ```
 
 With [uv](https://docs.astral.sh/uv/):
 
 ```console
-uv add --index https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
+uv add "crewdantic @ https://github.com/khanetor/crewdantic/releases/latest/download/crewdantic-0.2.0-py3-none-any.whl"
 ```
 
 ## Usage
