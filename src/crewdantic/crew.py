@@ -1,4 +1,5 @@
 import inspect
+import os
 import re
 from collections.abc import Mapping, Sequence
 from html import escape
@@ -17,7 +18,18 @@ from pydantic_ai import (
     UsageLimits,
     UserContent,
 )
-from pydantic_ai.models import Model, infer_model
+from pydantic_ai.models.decision import (
+    ChoiceAnswer,
+    ChoiceQuestion,
+    DecisionAnswer,
+    DecisionQuestion,
+    DecisionRequest,
+    NoulAnswer,
+    NoulQuestion,
+    ScoreAnswer,
+    ScoreQuestion,
+)
+from pydantic_ai.models.system_one import SystemOneModel
 from pydantic_ai.tools import AgentDepsT, ToolFuncEither
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 from typing_extensions import TypeVar
@@ -25,6 +37,71 @@ from typing_extensions import TypeVar
 from ._visualization import write_visualization
 
 NonEmptyString = Annotated[str, Field(min_length=1)]
+Probability = Annotated[float, Field(ge=0, le=1)]
+
+
+class NoulDecision(BaseModel):
+    """Probability that a statement is true."""
+
+    probability: Probability
+
+
+class ChoiceDecision(BaseModel):
+    """Selected option and the calibrated probability of every option."""
+
+    choice: str
+    probabilities: dict[str, float]
+    confidence: Probability
+
+
+class ScoreDecision(BaseModel):
+    """Probability-weighted position on an ordered scale."""
+
+    score: float
+    legend: dict[str, Any]
+    probabilities: dict[str, float]
+    confidence: Probability
+
+
+ExpectedOutput = (
+    NonEmptyString
+    | Annotated[
+        NoulQuestion | ChoiceQuestion | ScoreQuestion,
+        Field(discriminator="type"),
+    ]
+)
+
+
+def _decision_type(question: DecisionQuestion) -> type[BaseModel]:
+    if isinstance(question, NoulQuestion):
+        return NoulDecision
+    if isinstance(question, ChoiceQuestion):
+        return ChoiceDecision
+    if isinstance(question, ScoreQuestion):
+        return ScoreDecision
+    raise TypeError(f"Unsupported decision question: {question!r}")
+
+
+def _decision_result(question: DecisionQuestion, answer: DecisionAnswer) -> BaseModel:
+    if isinstance(question, NoulQuestion) and isinstance(answer, NoulAnswer):
+        return NoulDecision(probability=answer.noul)
+    if isinstance(question, ChoiceQuestion) and isinstance(answer, ChoiceAnswer):
+        return ChoiceDecision(
+            choice=answer.choice,
+            probabilities=answer.probabilities,
+            confidence=answer.confidence,
+        )
+    if isinstance(question, ScoreQuestion) and isinstance(answer, ScoreAnswer):
+        return ScoreDecision(
+            score=answer.score,
+            legend={str(level): value for level, value in answer.legend.items()},
+            probabilities={
+                str(level): probability
+                for level, probability in answer.probabilities.items()
+            },
+            confidence=answer.confidence,
+        )
+    raise ValueError("System One answer does not match its question")
 
 
 class AgentDefinition(BaseModel):
@@ -60,11 +137,9 @@ class TaskDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: NonEmptyString
-    expected_output: NonEmptyString
+    expected_output: ExpectedOutput
     agent: Annotated[NonEmptyString | None, Field(default=None)]
     context: Annotated[list[NonEmptyString] | None, Field(default=None)]
-    llm: Annotated[NonEmptyString | None, Field(default=None)]
-    output_model: Annotated[NonEmptyString | None, Field(default=None)]
 
 
 _Definition = TypeVar("_Definition")
@@ -147,6 +222,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         tools: Sequence[Tool[AgentDepsT] | ToolFuncEither[AgentDepsT, ...]] = (),
         toolsets: Mapping[str, AgentToolset[AgentDepsT]] | None = None,
         capabilities: Sequence[AgentCapability[AgentDepsT]] = (),
+        systemone_model: str | SystemOneModel | None = None,
     ) -> None:
         output_type = cast(type[CrewOutputT], output_type or str)
         deps_type = cast(type[AgentDepsT], deps_type or object)
@@ -221,21 +297,46 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     f"Agent {agent_name!r} references undefined Pydantic model "
                     f"{definition.output_model!r}"
                 )
-        for task_name, task in self.task_definitions.items():
-            if task.output_model is not None and task.output_model not in output_models:
+        decision_tasks = {
+            task_name: task
+            for task_name, task in self.task_definitions.items()
+            if not isinstance(task.expected_output, str)
+        }
+        if decision_tasks:
+            if self.manager_name is not None:
                 raise ValueError(
-                    f"Task {task_name!r} references undefined Pydantic model "
-                    f"{task.output_model!r}"
+                    "Decision tasks are not supported in a hierarchical crew"
                 )
+            for task_name, task in decision_tasks.items():
+                assert task.agent is not None
+                definition = self.agent_definitions[task.agent]
+                if definition.tools or definition.toolsets or definition.capabilities:
+                    raise ValueError(
+                        f"Task {task_name!r} decision step cannot use agent tools, "
+                        "toolsets, or capabilities"
+                    )
+            model = systemone_model or os.environ.get("SYSTEM_ONE_MODEL")
+            if model is None:
+                raise ValueError(
+                    "Decision tasks require systemone_model or SYSTEM_ONE_MODEL"
+                )
+            self._systemone = (
+                model if isinstance(model, SystemOneModel) else SystemOneModel(model)
+            )
+        else:
+            self._systemone = None
         self._validate_output_type(output_type, output_models)
         self._output_type = output_type
-        self._output_models = output_models
-        self._task_models: dict[str, Model] = {
-            task_name: infer_model(task.llm)
-            for task_name, task in self.task_definitions.items()
-            if task.llm is not None
-        }
 
+        self._agent_instructions: dict[str, str] = {
+            name: _safe_format(
+                f"Role: {definition.role}\n"
+                f"Goal: {definition.goal}\n"
+                f"Backstory: {definition.backstory}",
+                variables,
+            )
+            for name, definition in self.agent_definitions.items()
+        }
         self.agents: dict[str, Agent[AgentDepsT, BaseModel | str]] = {
             name: Agent(
                 model=definition.llm,
@@ -246,12 +347,7 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                     if definition.output_model is not None
                     else str
                 ),
-                instructions=_safe_format(
-                    f"Role: {definition.role}\n"
-                    f"Goal: {definition.goal}\n"
-                    f"Backstory: {definition.backstory}",
-                    variables,
-                ),
+                instructions=self._agent_instructions[name],
                 tools=[registered_tools[tool] for tool in definition.tools],
                 toolsets=[
                     registered_toolsets[toolset] for toolset in definition.toolsets
@@ -281,10 +377,17 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
         for index, (task_name, task) in enumerate(self.task_definitions.items()):
             try:
                 description = _safe_format(task.description, values, files)
-                expected_output = _safe_format(task.expected_output, values, files)
             except ValueError as error:
                 raise ValueError(f"Task {task_name!r}: {error}") from error
-            prompt = f"{description}\n\nExpected output:\n{expected_output}"
+            if isinstance(task.expected_output, str):
+                try:
+                    expected_output = _safe_format(task.expected_output, values, files)
+                except ValueError as error:
+                    raise ValueError(f"Task {task_name!r}: {error}") from error
+                prompt = f"{description}\n\nExpected output:\n{expected_output}"
+            else:
+                assert task.agent is not None
+                prompt = f"{self._agent_instructions[task.agent]}\n\n{description}"
             context_outputs = (
                 list(task_outputs.values())
                 if "context" not in task.model_fields_set
@@ -294,35 +397,32 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 prompt += "\n\nPrevious task outputs:\n" + "\n\n".join(
                     str(output) for output in context_outputs
                 )
+            if not isinstance(task.expected_output, str):
+                assert self._systemone is not None
+                response = await self._systemone.decide(
+                    DecisionRequest(
+                        state=prompt,
+                        questions={"decision": task.expected_output},
+                    ),
+                    {},
+                )
+                task_outputs[task_name] = _decision_result(
+                    task.expected_output, response.answers["decision"]
+                )
+                continue
+
             prompt_parts: str | list[str | UserContent] = _inject_files(
                 prompt, files, task_name
             )
 
             if self.manager_name is None:
                 assert task.agent is not None
-                agent = self.agents[task.agent]
-                output_type = (
-                    self._output_models[task.output_model]
-                    if task.output_model is not None
-                    else agent.output_type
+                result = await self.agents[task.agent].run(
+                    prompt_parts,
+                    deps=cast(AgentDepsT, context),
+                    usage=usage,
+                    usage_limits=limits,
                 )
-                if task.llm is None:
-                    result = await agent.run(
-                        prompt_parts,
-                        output_type=output_type,
-                        deps=cast(AgentDepsT, context),
-                        usage=usage,
-                        usage_limits=limits,
-                    )
-                else:
-                    with agent.override(model=self._task_models[task_name]):
-                        result = await agent.run(
-                            prompt_parts,
-                            output_type=output_type,
-                            deps=cast(AgentDepsT, context),
-                            usage=usage,
-                            usage_limits=limits,
-                        )
             else:
                 coworkers = {
                     name: agent
@@ -406,13 +506,6 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 raise ValueError(
                     f"Task {task_name!r} cannot assign manager {task.agent!r} as a worker"
                 )
-            if self.manager_name is not None and (
-                task.llm is not None or task.output_model is not None
-            ):
-                raise ValueError(
-                    f"Task {task_name!r} cannot override llm or output_model "
-                    "in a hierarchical crew"
-                )
             previous_tasks.add(task_name)
 
     def _validate_output_type(
@@ -425,18 +518,19 @@ class Crew(Generic[CrewOutputT, AgentDepsT]):
                 f"Crew declares output {output_type.__name__} but has no tasks"
             )
         final_task_name = next(reversed(self.task_definitions))
-        final_agent_name = (
-            self.manager_name or self.task_definitions[final_task_name].agent
-        )
+        final_task = self.task_definitions[final_task_name]
+        final_agent_name = self.manager_name or final_task.agent
         assert final_agent_name is not None
-        final_definition = self.agent_definitions[final_agent_name]
-        final_output_model = (
-            self.task_definitions[final_task_name].output_model
-            or final_definition.output_model
-        )
-        final_output_type = (
-            output_models[final_output_model] if final_output_model is not None else str
-        )
+        if isinstance(final_task.expected_output, str):
+            final_definition = self.agent_definitions[final_agent_name]
+            final_output_model = final_definition.output_model
+            final_output_type = (
+                output_models[final_output_model]
+                if final_output_model is not None
+                else str
+            )
+        else:
+            final_output_type = _decision_type(final_task.expected_output)
         if final_output_type is output_type:
             return
         if self.manager_name is not None:

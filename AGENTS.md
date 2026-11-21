@@ -38,7 +38,7 @@ Never store API keys in source, YAML, examples, tests, or `.env` files committed
 - Accept agent and task YAML paths explicitly through the `Crew` constructor. Resolve relative strings and `Path` values beside the module constructing the crew.
 - Every task must reference a declared agent.
 - Every agent must declare `llm`; `output_model` remains optional and defaults to `str`.
-- Task definitions may override `llm` and `output_model` for one step, enabling decision-model steps such as `system-one:<model>`; hierarchical crews reject both overrides because the manager runs every task.
+- A task `expected_output` is either a string for a chat-model step or a System One decision question (`type: noul`, `choice`, or `score`) parsed with Pydantic AI's decision base models. Decision steps reuse the task's `agent` for framing, require `systemone_model` or `SYSTEM_ONE_MODEL`, return `NoulDecision`, `ChoiceDecision`, or `ScoreDecision`, and are rejected in hierarchical crews.
 - Resolve `output_model` by Pydantic class name from `output_type` or the constructor's additional `pydantic_models`.
 - `kickoff()` runs tasks in YAML order, forwards each result to the next task, and supplies its context to every agent as Pydantic AI dependencies.
 - Constructor `output_type` and `deps_type` arguments type the final result and each agent's `RunContext`, defaulting to `str` and `object`. Construction must reject a missing task sequence or a final task whose agent output does not exactly match `output_type`, before any agent runs.

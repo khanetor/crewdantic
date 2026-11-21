@@ -1,4 +1,11 @@
-from .crew import Crew
+from .crew import ChoiceDecision, Crew, NoulDecision, ScoreDecision
 from .workflow import Workflow, step
 
-__all__ = ["Crew", "Workflow", "step"]
+__all__ = [
+    "ChoiceDecision",
+    "Crew",
+    "NoulDecision",
+    "ScoreDecision",
+    "Workflow",
+    "step",
+]

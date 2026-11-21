@@ -262,62 +262,57 @@ including lists, mappings, and Pydantic models.
 
 ## Decision steps
 
-A task can run on a Pydantic AI decision model such as System One by overriding
-its agent's `llm` and `output_model`. Each `output_model` field becomes one
-question: `bool` is a yes/no (`noul`), a `Literal` of strings is a choice, and a
-union of whole-number `Literal`s with a description per level is a score.
-
-```python
-from typing import Annotated, Literal
-
-from pydantic import BaseModel, Field
-
-
-Severity = (
-    Annotated[Literal[0], Field(description="Cosmetic or trivial")]
-    | Annotated[Literal[1], Field(description="Blocks one user, workaround exists")]
-    | Annotated[Literal[2], Field(description="Blocks many users")]
-)
-
-
-class TriageDecision(BaseModel):
-    """Route a support message."""
-
-    urgent: bool = Field(description="Does someone need to act now?")
-    team: Literal["billing", "engineering", "sales"] = Field(
-        description="Which team owns this?"
-    )
-    severity: Severity = Field(description="How bad is it?")
-```
+A task's `expected_output` is either a string (a chat-model task) or a System One
+decision question. Decision questions parse directly from YAML:
 
 ```yaml
-# tasks.yaml
-triage:
+urgent:
   description: "{message}"
-  expected_output: A routing decision
+  expected_output:
+    type: noul
+    instructions: Does someone need to act on this now?
   agent: triage
-  llm: system-one:d3:4b
-  output_model: TriageDecision
+team:
+  description: Route the message to its team
+  expected_output:
+    type: choice
+    instructions: Which team owns this?
+    criteria:
+      billing: Invoices and payments
+      engineering: Bugs and outages
+  agent: triage
+severity:
+  description: Rate how badly the issue affects users
+  expected_output:
+    type: score
+    instructions: How bad is it?
+    criteria:
+      - Cosmetic or trivial
+      - Blocks many users
+  agent: triage
 ```
 
 ```python
 crew = Crew(
     agent_definition="agents.yaml",
     task_definition="tasks.yaml",
-    output_type=TriageDecision,
+    output_type=ScoreDecision,
+    systemone_model="d3:4b",
 )
 decision = await crew.kickoff(inputs={"message": "Delivery was late."})
 ```
 
-`llm` and `output_model` are optional per-task overrides of the assigned
-agent's values, so one task YAML file can mix chat and decision steps. Agents
-still declare a default `llm`, and hierarchical crews reject task overrides
-because the manager runs every step.
+Decision tasks return `NoulDecision(probability)`, `ChoiceDecision(choice,
+probabilities, confidence)`, or `ScoreDecision(score, legend, probabilities,
+confidence)`. The task still names its `agent`; its role, goal, and backstory
+frame the state, and its tools, toolsets, and capabilities are rejected because
+decision requests carry no tools. The final decision task's result type must
+match `output_type`, and hierarchical crews reject decision tasks.
 
-System One reads `SYSTEM_ONE_BASE_URL` and, when required,
-`SYSTEM_ONE_API_KEY`. A local Ollama server exposes the endpoint, so
-`SYSTEM_ONE_BASE_URL=http://localhost:11434` with `llm: system-one:d3:4b` runs
-without a key.
+`systemone_model` is the model ID, falling back to `SYSTEM_ONE_MODEL`; the
+provider reads `SYSTEM_ONE_BASE_URL` and `SYSTEM_ONE_API_KEY`. A local Ollama
+server exposes the endpoint, so `SYSTEM_ONE_BASE_URL=http://localhost:11434`
+with `systemone_model="d3:4b"` runs without a key.
 
 ## Workflows
 

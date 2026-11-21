@@ -1,6 +1,26 @@
-triage:
+urgent:
   description: "{message}"
-  expected_output: A routing decision
+  expected_output:
+    type: noul
+    instructions: Does someone need to act on this now?
   agent: triage
-  llm: system-one:d3:4b
-  output_model: TriageDecision
+team:
+  description: Route the message to the team that owns it
+  expected_output:
+    type: choice
+    instructions: Which team owns this?
+    criteria:
+      billing: Invoices and payments
+      engineering: Bugs and outages
+      sales: New purchases
+  agent: triage
+severity:
+  description: Rate how badly the issue affects users
+  expected_output:
+    type: score
+    instructions: How bad is it?
+    criteria:
+      - Cosmetic or trivial
+      - Blocks one user, workaround exists
+      - Blocks many users
+  agent: triage

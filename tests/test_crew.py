@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from collections.abc import Generator
@@ -5,10 +6,10 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import assert_type
-from unittest.mock import patch
+from typing import Any, assert_type
 
 import anyio
+import httpx2
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import (
@@ -29,9 +30,11 @@ from pydantic_ai import (
 from pydantic_ai.capabilities import MCP, AbstractCapability
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.system_one import SystemOneModel
+from pydantic_ai.providers.system_one import SystemOneProvider
 from typing_extensions import override
 
-from crewdantic import Crew
+from crewdantic import Crew, NoulDecision, ScoreDecision
 
 
 @contextmanager
@@ -39,6 +42,44 @@ def definition_paths() -> Generator[tuple[Path, Path]]:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         yield root / "agents.yaml", root / "tasks.yaml"
+
+
+DECISION_ANSWERS: dict[str, dict[str, Any]] = {
+    "noul": {"type": "noul", "noul": 0.75},
+    "choice": {
+        "type": "choice",
+        "choice": "billing",
+        "probabilities": {"billing": 0.6, "engineering": 0.3, "sales": 0.1},
+        "confidence": 0.2,
+    },
+    "score": {
+        "type": "score",
+        "score": 1.4,
+        "legend": {"0": "Low", "1": "Medium", "2": "High"},
+        "probabilities": {"0": 0.1, "1": 0.4, "2": 0.5},
+        "confidence": 0.1,
+    },
+}
+
+
+def fake_systemone() -> SystemOneModel:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        payload = json.loads(request.content)
+        question = payload["questions"]["decision"]
+        return httpx2.Response(
+            200,
+            json={
+                "model": payload.get("model", "fake"),
+                "answers": {"decision": DECISION_ANSWERS[question["type"]]},
+                "usage": {"input_tokens": 1, "output_tokens": 0},
+            },
+        )
+
+    provider = SystemOneProvider(
+        base_url="https://systemone.test",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    )
+    return SystemOneModel("jev-test", provider=provider)
 
 
 class ResearchOutput(BaseModel):
@@ -1172,90 +1213,120 @@ class CrewTests(unittest.TestCase):
                     )
                 )
 
-    def test_task_overrides_model_and_output_model(self) -> None:
+    def test_runs_decision_tasks_through_systemone(self) -> None:
         with definition_paths() as (agents, tasks):
             agents.write_text(
-                "writer:\n"
-                "  role: Writer\n"
-                "  goal: Write clearly\n"
-                "  backstory: Clear\n"
+                "triage:\n"
+                "  role: Triage analyst\n"
+                "  goal: Route support messages\n"
+                "  backstory: Decisive\n"
                 "  llm: test\n"
-                "  output_model: ResearchOutput\n"
             )
             tasks.write_text(
-                "compose:\n"
-                "  description: Compose the report\n"
-                "  expected_output: One structured finding\n"
-                "  agent: writer\n"
-                "  llm: test\n"
-                "  output_model: ResearchOutput\n"
+                "urgent:\n"
+                '  description: "{message}"\n'
+                "  expected_output:\n"
+                "    type: noul\n"
+                "    instructions: Does someone need to act now?\n"
+                "  agent: triage\n"
+                "team:\n"
+                "  description: Route the message\n"
+                "  expected_output:\n"
+                "    type: choice\n"
+                "    instructions: Which team owns this?\n"
+                "    criteria:\n"
+                "      billing: Invoices and payments\n"
+                "      engineering: Bugs and outages\n"
+                "      sales: New purchases\n"
+                "  agent: triage\n"
+                "severity:\n"
+                "  description: Rate the severity\n"
+                "  expected_output:\n"
+                "    type: score\n"
+                "    instructions: How bad is it?\n"
+                "    criteria:\n"
+                "      - Low\n"
+                "      - Medium\n"
+                "      - High\n"
+                "  agent: triage\n"
+            )
+            crew = Crew(
+                agent_definition=agents,
+                task_definition=tasks,
+                output_type=ScoreDecision,
+                systemone_model=fake_systemone(),
             )
 
-            def respond(_messages, info):
-                return ModelResponse(
-                    parts=[
-                        ToolCallPart(
-                            tool_name=info.output_tools[0].name,
-                            args={"finding": "Task model decided."},
-                        )
-                    ]
-                )
+            output = anyio.run(
+                partial(crew.kickoff, inputs={"message": "Delivery was late"})
+            )
 
-            task_model = FunctionModel(respond)
-            with patch("crewdantic.crew.infer_model", return_value=task_model) as infer:
-                crew = Crew(
-                    agent_definition=agents,
-                    task_definition=tasks,
-                    output_type=ResearchOutput,
-                )
+            self.assertEqual(
+                output,
+                ScoreDecision(
+                    score=1.4,
+                    legend={"0": "Low", "1": "Medium", "2": "High"},
+                    probabilities={"0": 0.1, "1": 0.4, "2": 0.5},
+                    confidence=0.1,
+                ),
+            )
 
-            infer.assert_called_once_with("test")
-            output = anyio.run(crew.kickoff)
-            self.assertEqual(output, ResearchOutput(finding="Task model decided."))
-
-    def test_rejects_task_output_and_model_overrides_that_cannot_apply(self) -> None:
+    def test_rejects_invalid_decision_task_configuration(self) -> None:
         with definition_paths() as (agents, tasks):
             agents.write_text(
-                "writer:\n"
-                "  role: Writer\n"
-                "  goal: Write clearly\n"
-                "  backstory: Clear\n"
+                "triage:\n"
+                "  role: Triage analyst\n"
+                "  goal: Route support messages\n"
+                "  backstory: Decisive\n"
                 "  llm: test\n"
-                "  output_model: ResearchOutput\n"
             )
             tasks.write_text(
-                "compose:\n"
-                "  description: Compose\n"
-                "  expected_output: One finding\n"
-                "  agent: writer\n"
-                "  output_model: MissingOutput\n"
+                "urgent:\n"
+                "  description: Route the message\n"
+                "  expected_output:\n"
+                "    type: noul\n"
+                "    instructions: Does someone need to act now?\n"
+                "  agent: triage\n"
             )
-            with self.assertRaises(ValueError):
+
+            with self.assertRaisesRegex(ValueError, "systemone_model"):
                 Crew(
                     agent_definition=agents,
                     task_definition=tasks,
-                    output_type=ResearchOutput,
+                    output_type=NoulDecision,
                 )
 
-            tasks.write_text(
-                tasks.read_text().replace("MissingOutput", "ResearchOutput")
-            )
+            with self.assertRaises(TypeError):
+                Crew(
+                    agent_definition=agents,
+                    task_definition=tasks,
+                    output_type=str,
+                    systemone_model=fake_systemone(),
+                )
+
             agents.write_text(
                 "manager:\n"
                 "  manager: true\n"
                 "  llm: test\n"
                 "  output_model: ResearchOutput\n"
-                "writer:\n"
-                "  role: Writer\n"
-                "  goal: Write\n"
-                "  backstory: Clear\n"
+                "triage:\n"
+                "  role: Triage analyst\n"
+                "  goal: Route\n"
+                "  backstory: Decisive\n"
                 "  llm: test\n"
             )
-            with self.assertRaisesRegex(ValueError, "cannot override llm"):
+            tasks.write_text(
+                tasks.read_text() + "resolved:\n"
+                "  description: Finish\n"
+                "  expected_output: Done\n"
+                "  agent: triage\n"
+            )
+            with self.assertRaisesRegex(ValueError, "hierarchical crew"):
                 Crew(
                     agent_definition=agents,
                     task_definition=tasks,
                     output_type=ResearchOutput,
+                    systemone_model=fake_systemone(),
                 )
 
 

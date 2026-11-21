@@ -1,5 +1,5 @@
 triage:
   role: Support triage analyst
-  goal: Route support messages to the right team
+  goal: Judge support messages and route them
   backstory: Careful, decisive, and brief
   llm: test
