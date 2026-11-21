@@ -8,10 +8,9 @@ on:
       - "src/**"
       - "pyproject.toml"
       - "uv.lock"
-
 jobs:
   version-bump:
-    runs-on: ubuntu-latest
+    runs-on: uv
     steps:
       - uses: actions/checkout@v7
         with:
@@ -19,7 +18,7 @@ jobs:
 
       - name: Check version is bumped
         run: |
-          BASE=$(git show "${{ github.event.pull_request.base.sha }}:pyproject.toml" | grep -m1 '^version' | cut -d'"' -f2)
+          BASE=$(git show "origin/${{ github.base_ref }}:pyproject.toml" | grep -m1 '^version' | cut -d'"' -f2)
           HEAD=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
           echo "base version: $BASE, PR version: $HEAD"
           if [ "$HEAD" = "$BASE" ] || [ "$(printf '%s\n%s\n' "$BASE" "$HEAD" | sort -V | head -n 1)" != "$BASE" ]; then

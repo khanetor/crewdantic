@@ -4,8 +4,11 @@ A minimal crew abstraction for Pydantic AI, configured with CrewAI-style YAML.
 
 ## Installation
 
+Packages are published on the [Codeberg PyPI registry](https://codeberg.org/khanetor/crewdantic/packages).
+Use `--extra-index-url` so dependencies still resolve from PyPI:
+
 ```console
-pip install --index-url https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
+pip install --extra-index-url https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
 ```
 
 With [uv](https://docs.astral.sh/uv/):
@@ -13,6 +16,8 @@ With [uv](https://docs.astral.sh/uv/):
 ```console
 uv add --index https://codeberg.org/api/packages/khanetor/pypi/simple/ crewdantic
 ```
+
+The GitHub repository is a read-only mirror; development, releases, and packages live on Codeberg.
 
 ## Usage
 
