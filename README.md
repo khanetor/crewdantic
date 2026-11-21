@@ -260,6 +260,51 @@ inputs independently.
 Template values may be any Python object supported by string formatting,
 including lists, mappings, and Pydantic models.
 
+## System One decisions
+
+`SystemOne` is a reusable capability that gives agents `noul`, `choice`, and
+`score` tools backed by a Jev-compatible `/v1/systemone` endpoint. Each tool
+returns a typed `NoulDecision`, `ChoiceDecision`, or `ScoreDecision`; the
+agent's own `output_model` is unchanged. Register it through the constructor
+and opt in from YAML:
+
+```python
+from crewdantic import Crew, SystemOne
+
+crew = Crew(
+    agent_definition="agents.yaml",
+    task_definition="tasks.yaml",
+    capabilities=[SystemOne(id="systemone")],
+)
+```
+
+```yaml
+researcher:
+  role: Researcher
+  goal: Classify findings
+  backstory: Decisive
+  llm: openai:gpt-5.2
+  capabilities:
+    - systemone
+```
+
+Pass `base_url`, `model`, and `api_key` explicitly, or set
+`SYSTEMONE_BASE_URL`, `SYSTEMONE_MODEL`, and `SYSTEMONE_API_KEY`. `base_url` is
+the host; requests go to `<base_url>/v1/systemone`. An injected
+`httpx.AsyncClient` replaces the per-call client, so tests need no network:
+
+```python
+import httpx
+from crewdantic import SystemOne
+
+systemone = SystemOne(
+    base_url="https://inference.do-ai.run",
+    model="typesafe-jev-1.13.0",
+    api_key="...",
+    client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+)
+```
+
 ## Workflows
 
 `Workflow[InputT, OutputT]` builds a typed DAG from `@step` method
