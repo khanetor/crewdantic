@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import assert_type
 
 import anyio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ValidationError
 from pydantic_ai import (
     BinaryContent,
@@ -771,7 +771,7 @@ class CrewTests(unittest.TestCase):
                 )
                 calls: list[int] = []
 
-                server = FastMCP("math")
+                server = MCPServer("math")
 
                 @server.tool()
                 def increment(value: int) -> int:
