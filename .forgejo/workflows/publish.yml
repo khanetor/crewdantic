@@ -32,7 +32,13 @@ jobs:
         run: uv build
 
       - name: Publish to Codeberg package registry
-        run: uv publish --publish-url https://codeberg.org/api/packages/khanetor/pypi
+        run: |
+          VERSION=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+          if curl -sf "https://codeberg.org/api/v1/packages/khanetor/pypi/crewdantic/$VERSION" >/dev/null; then
+            echo "version $VERSION is already published, skipping"
+          else
+            uv publish --publish-url https://codeberg.org/api/packages/khanetor/pypi
+          fi
         env:
           UV_PUBLISH_USERNAME: khanetor
           UV_PUBLISH_PASSWORD: ${{ secrets.REPO_PASSWORD }}
